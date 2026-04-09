@@ -1,0 +1,197 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+.eval-live {
+  font-family: system-ui, -apple-system, sans-serif;
+  color: #1a1a1a;
+  line-height: 1.5;
+}
+
+.eval-live .eval-live-title {
+  font-size: 1.6rem;
+  font-weight: 700;
+  margin-bottom: 1.5rem;
+}
+
+.eval-live .raw-tables-header {
+  font-size: 1.4rem;
+  font-weight: 700;
+  margin-top: 2rem;
+  margin-bottom: 1rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 3px solid #999;
+}
+
+.eval-live .table-section {
+  margin-bottom: 3rem;
+}
+
+.eval-live .table-section h2 {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: #333;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.4rem;
+  border-bottom: 2px solid #e0e0e0;
+}
+
+.eval-live .row-count {
+  color: #888;
+  font-size: 0.8rem;
+  font-weight: 400;
+  margin-left: 0.5rem;
+}
+
+.eval-live .table-wrap {
+  overflow-x: auto;
+  border-radius: 8px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.07);
+}
+
+.eval-live table {
+  border-collapse: separate;
+  border-spacing: 0;
+  width: 100%;
+  font-size: 0.85rem;
+  background: #fff;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.eval-live th,
+.eval-live td {
+  padding: 0.55rem 0.85rem;
+  text-align: left;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 600px;
+  border-bottom: 1px solid #eee;
+}
+
+.eval-live th {
+  background: #f0f1f4;
+  color: #444;
+  font-weight: 600;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  position: sticky;
+  top: 0;
+  border-bottom: 2px solid #ddd;
+}
+
+.eval-live td {
+  vertical-align: top;
+  color: #333;
+}
+
+.eval-live tbody tr:hover {
+  background: #f8f9fc;
+}
+
+.eval-live tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.eval-live tbody tr.collapsed td {
+  max-height: 1.5em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.eval-live .expand-col {
+  width: 2.2rem;
+  min-width: 2.2rem;
+  text-align: center;
+  padding: 0.3rem;
+}
+
+.eval-live .expand-btn {
+  background: none;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.75rem;
+  line-height: 1;
+  padding: 0.2rem 0.4rem;
+  color: #555;
+}
+
+.eval-live .expand-btn:hover {
+  background: #eee;
+}
+
+.eval-live .filter-input {
+  width: 100%;
+  padding: 0.3rem 0.5rem;
+  font-size: 0.78rem;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  color: #333;
+}
+
+.eval-live .filter-input::placeholder {
+  color: #aaa;
+}
+
+.eval-live .filter-row th {
+  background: #f7f8fa;
+  border-bottom: 2px solid #ddd;
+  padding: 0.35rem 0.5rem;
+}
+
+/* Graphs */
+.eval-live .graph-section {
+  margin-bottom: 2.5rem;
+}
+
+.eval-live .graph-status {
+  color: #666;
+  font-size: 0.85rem;
+  margin-bottom: 0.75rem;
+}
+
+.eval-live .graph-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin-bottom: 1rem;
+}
+
+.eval-live .graph-btn {
+  padding: 0.4rem 0.9rem;
+  font-size: 0.82rem;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  background: #fff;
+  color: #444;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.eval-live .graph-btn:hover {
+  background: #f0f1f4;
+}
+
+.eval-live .graph-btn.active {
+  background: #333;
+  color: #fff;
+  border-color: #333;
+}
+
+.eval-live .graph-display {
+  border-radius: 8px;
+  overflow: hidden;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.07);
+  background: #fff;
+}
+
+.eval-live .graph-display img {
+  display: block;
+  max-width: 100%;
+}

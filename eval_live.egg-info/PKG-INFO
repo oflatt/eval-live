@@ -1,0 +1,5 @@
+Metadata-Version: 2.4
+Name: eval-live
+Version: 0.1.0
+Summary: Interactive HTML tables and Pyodide-powered graphs for evaluation results
+Requires-Python: >=3.10

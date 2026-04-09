@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eval Live</title>
+  <link rel="stylesheet" href="eval-live.css">
+  <style>
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      margin: 0;
+      padding: 2rem 3rem;
+      background: #f5f6f8;
+      color: #1a1a1a;
+    }
+    h1 { font-size: 1.6rem; font-weight: 700; margin-bottom: 0.25rem; }
+    .file-picker { margin-bottom: 2rem; color: #555; }
+    .file-picker input[type="file"] { font-size: 0.85rem; }
+  </style>
+</head>
+<body>
+  <h1>Eval Live</h1>
+  <div class="file-picker">
+    <label for="json-file">Load a results.json file:&nbsp;</label>
+    <input type="file" id="json-file" accept=".json">
+    <br><br>
+    <label for="project-name">Project name (optional):&nbsp;</label>
+    <input type="text" id="project-name" placeholder="My Project">
+  </div>
+  <div id="tables"></div>
+
+  <script src="eval-live.js"></script>
+  <script>
+    document.getElementById("json-file").addEventListener("change", (e) => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const name = document.getElementById("project-name").value || undefined;
+          initEvalLive("tables", JSON.parse(ev.target.result), name);
+        } catch (err) {
+          document.getElementById("tables").textContent = "Error parsing JSON: " + err.message;
+        }
+      };
+      reader.readAsText(file);
+    });
+  </script>
+</body>
+</html>
