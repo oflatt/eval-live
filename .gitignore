@@ -1,1 +1,2 @@
 eval_live/__pycache__/
+*.egg-info/
