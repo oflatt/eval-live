@@ -16,8 +16,18 @@ def css() -> str:
 
 
 def js() -> str:
-    """Return the eval-live JavaScript library as a string."""
-    return (_PKG / "eval-live.js").read_text(encoding="utf-8")
+    """Return the eval-live JavaScript library as a string.
+
+    The vendored AlaSQL bundle (an in-memory SQL engine, MIT-licensed) is
+    prepended so it loads in the same self-contained ``<script>`` tag and is
+    available as the global ``alasql`` -- the eval-live filter box uses it to
+    evaluate user-typed SQL WHERE clauses. AlaSQL makes no network calls for
+    the in-memory ``SELECT ... FROM ? WHERE ...`` queries we run, so the page
+    stays CSP-safe / fully self-contained.
+    """
+    alasql = (_PKG / "vendor" / "alasql.min.js").read_text(encoding="utf-8")
+    lib = (_PKG / "eval-live.js").read_text(encoding="utf-8")
+    return alasql + "\n" + lib
 
 
 def pyodide_lib() -> str:
