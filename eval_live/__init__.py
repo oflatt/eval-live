@@ -1,6 +1,12 @@
 """eval-live: interactive HTML tables and Pyodide-powered graphs for evaluation results."""
 from importlib.resources import files
 
+# Re-export the registry API so it is importable both in the browser (where
+# `eval_live` IS the pyodide lib module) and locally (where `eval_live` is this
+# package). Local code can build a Registry and call `render_to_dir` to write
+# graphs/tables to disk without Pyodide.
+from .eval_live import Registry, registry  # noqa: F401
+
 _PKG = files(__package__)
 
 

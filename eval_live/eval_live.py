@@ -139,6 +139,47 @@ class Registry:
             results.append({"name": name, "src": f"data:image/png;base64,{b64}"})
         return results
 
+    def render_to_dir(self, data, outdir, fmt="pdf", dpi=150):
+        """Render every registered graph and table to files on disk, locally
+        (no browser/Pyodide). Graphs are written as ``<slug>.<fmt>`` (PDF by
+        default) and tables as ``<slug>.csv``. Returns the list of written
+        paths. This is the on-disk counterpart to ``run_graphs``/``run_tables``
+        (which return base64/JSON for the live viewer). Requires matplotlib to
+        be installed in the local environment.
+        """
+        import os
+        import re
+        import csv
+        import matplotlib
+        matplotlib.use("AGG")
+        import matplotlib.pyplot as plt
+
+        os.makedirs(outdir, exist_ok=True)
+        written = []
+
+        def slug(name):
+            return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-") or "graph"
+
+        for name, fn in self._graphs:
+            fig = fn(data)
+            path = os.path.join(outdir, f"{slug(name)}.{fmt}")
+            fig.savefig(path, format=fmt, dpi=dpi, bbox_inches="tight")
+            plt.close(fig)
+            written.append(path)
+
+        for name, fn, _fs in self._tables:
+            rows = fn(data)
+            path = os.path.join(outdir, f"{slug(name)}.csv")
+            cols = list(dict.fromkeys(k for r in rows for k in r))
+            with open(path, "w", newline="") as f:
+                w = csv.DictWriter(f, fieldnames=cols, restval="",
+                                   extrasaction="ignore")
+                w.writeheader()
+                w.writerows(rows)
+            written.append(path)
+
+        return written
+
     def run_tables(self, data):
         """Run all registered table functions and return their rows.
 
