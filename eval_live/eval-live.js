@@ -96,7 +96,22 @@ function initEvalLive(container, data, name, graphScript, evalLivePy) {
 
   for (const [tableName, rows] of Object.entries(data)) {
     if (!Array.isArray(rows) || rows.length === 0) continue;
-    const section = buildTable(tableName, rows, state.tableStates, state.onRawFilterChange);
+    const section = buildTable(tableName, rows, state.tableStates,
+                               state.onRawFilterChange, true,
+                               TABLE_DESCRIPTIONS[tableName]);
     container.appendChild(section);
   }
 }
+
+// Clarifying subtitles for known result tables. Distinguishes expected, non-bug
+// outcomes (warnings, skipped) from real failures (errors). Unknown tables get
+// no subtitle. Keyed by the top-level results.json array name.
+const TABLE_DESCRIPTIONS = {
+  warnings: "Expected, non-bug failures: timeouts and cells that use a feature "
+    + "the backend/encoding does not support (push/pop, proofs-incompatible "
+    + "commands). Kept out of “errors” on purpose.",
+  errors: "Real, unexpected failures (likely bugs). Expected non-bug failures "
+    + "live in the “warnings” table instead.",
+  skipped: "Files excluded up front (not benchmarked) and why — e.g. "
+    + "unsupported by the term encoding, or no bridge-normal reference.",
+};

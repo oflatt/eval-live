@@ -9,9 +9,10 @@
  * @param {Array} tableStates - array to push state into
  * @param {Function} onFilterChange - called when filters change
  * @param {boolean} [filterable=true] - whether to show filter inputs
+ * @param {string} [description] - optional clarifying subtitle under the heading
  * @returns {HTMLElement}
  */
-function buildTable(tableName, rows, tableStates, onFilterChange, filterable) {
+function buildTable(tableName, rows, tableStates, onFilterChange, filterable, description) {
   if (filterable === undefined) filterable = true;
   const tableState = { tableName, rows, visibleRows: rows };
   tableStates.push(tableState);
@@ -26,6 +27,14 @@ function buildTable(tableName, rows, tableStates, onFilterChange, filterable) {
   rowCount.textContent = `(${rows.length} rows)`;
   heading.appendChild(rowCount);
   section.appendChild(heading);
+
+  // Optional clarifying subtitle (e.g. "warnings" = expected, non-bug failures).
+  if (description) {
+    const desc = document.createElement("p");
+    desc.className = "table-description";
+    desc.textContent = description;
+    section.appendChild(desc);
+  }
 
   const cols = [...new Set(rows.flatMap(Object.keys))];
 

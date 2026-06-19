@@ -45,6 +45,14 @@
   margin-left: 0.5rem;
 }
 
+.eval-live .table-description {
+  margin: -0.4rem 0 0.8rem;
+  color: #777;
+  font-size: 0.82rem;
+  font-style: italic;
+  max-width: 70ch;
+}
+
 .eval-live .table-wrap {
   overflow-x: auto;
   border-radius: 8px;
