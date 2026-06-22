@@ -188,4 +188,31 @@ test("setHighlight reducer (default lowest, idempotent)", () => {
   assert.equal(ctx.setHighlight(state, "runs", "highest"), false);
 });
 
+test("toggleCheckbox edits the table's SQL box (clause for a column)", () => {
+  const state = ctx.makeState({ runs: ROWS });
+  // uncheck flowlog -> only feldera selected -> "backend = 'feldera'"
+  ctx.toggleCheckbox(state, "runs", "backend", ["feldera"], ["feldera", "flowlog"]);
+  assert.equal(state.ui.tables.runs.sql, "backend = 'feldera'");
+  // re-check both -> clause removed
+  ctx.toggleCheckbox(state, "runs", "backend", ["feldera", "flowlog"], ["feldera", "flowlog"]);
+  assert.equal(state.ui.tables.runs.sql, "");
+});
+
+test("resolveActiveGraph: chosen if present, else first, else null", () => {
+  const state = ctx.makeState({ runs: ROWS });
+  assert.equal(ctx.resolveActiveGraph(state), null);                 // no graphs
+  state.engine.graphs = [{ name: "A" }, { name: "B" }];
+  assert.equal(ctx.resolveActiveGraph(state), "A");                  // default to first
+  ctx.setActiveGraph(state, "B");
+  assert.equal(ctx.resolveActiveGraph(state), "B");                  // honor chosen
+  state.engine.graphs = [{ name: "A" }];                             // B disappeared
+  assert.equal(ctx.resolveActiveGraph(state), "A");                  // fall back to first
+});
+
+test("narrowedKeySet / rowKey identify rows by content", () => {
+  const set = ctx.narrowedKeySet([ROWS[0], ROWS[2]]);
+  assert.equal(set.has(ctx.rowKey(ROWS[0])), true);
+  assert.equal(set.has(ctx.rowKey(ROWS[1])), false);
+});
+
 console.log(`\n${passed} tests passed`);

@@ -140,8 +140,8 @@ function effectiveRawData(state) {
   for (const name of Object.keys(fd)) {
     const allowedRows = narrowing[name];
     if (allowedRows) {
-      const allowed = new Set(allowedRows.map((r) => JSON.stringify(r)));
-      out[name] = fd[name].filter((r) => allowed.has(JSON.stringify(r)));
+      const allowed = narrowedKeySet(allowedRows);
+      out[name] = fd[name].filter((r) => allowed.has(rowKey(r)));
     } else {
       out[name] = fd[name];
     }
@@ -184,6 +184,17 @@ function distinctScalarValues(rows, col) {
 // inputs actually change).
 function stableKey(value) {
   return JSON.stringify(value);
+}
+
+// Row identity for the computed->raw narrowing: a row is "allowed" if it matches
+// one of the narrowed rows. Defined in ONE place so the identity scheme (today:
+// content via JSON; could become a stable id) can be hardened without touching
+// the call sites in effectiveRawData and the table view.
+function rowKey(row) {
+  return JSON.stringify(row);
+}
+function narrowedKeySet(rows) {
+  return new Set(rows.map(rowKey));
 }
 
 // A cell counts as numeric if it is a finite number or a string that parses as
@@ -301,6 +312,24 @@ function setActiveGraph(state, name) {
   return true;
 }
 
+// Apply a checkbox toggle for `col`: regenerate the column's clause from the
+// `checked` values (out of `all`) and splice it into the table's SQL box. The
+// checkboxes are a view of ui.sql, so this is just an edit to that string.
+function toggleCheckbox(state, name, col, checked, all) {
+  const ui = ensureTableUi(state, name);
+  const clause = columnClauseFor(col, checked, all);
+  return setSql(state, name, setColumnClause(ui.sql || "", col, clause));
+}
+
+// The graph to show: the chosen one if it still exists, else the first. Pure so
+// the view is a straight read rather than carrying the fallback logic. `graphs`
+// is state.engine.graphs ([{name, ...}]).
+function resolveActiveGraph(state) {
+  const names = state.engine.graphs.map((g) => g.name);
+  if (state.ui.activeGraph && names.includes(state.ui.activeGraph)) return state.ui.activeGraph;
+  return names[0] || null;
+}
+
 function setHighlight(state, name, mode) {
   const ui = ensureTableUi(state, name);
   if (ui.highlight === mode) return false;
@@ -323,8 +352,10 @@ if (typeof module !== "undefined" && module.exports) {
   module.exports = {
     makeState, makeTableUi, ensureTableUi, cellText, columnsOf,
     visibleRowIndices, visibleRows, rawFilteredData, effectiveRawData,
-    computedFilterInputs, distinctScalarValues, stableKey, isNumericValue, bestNumericCols,
+    computedFilterInputs, distinctScalarValues, stableKey, rowKey, narrowedKeySet,
+    isNumericValue, bestNumericCols,
     extractColumnValues, removeColumnClause, setColumnClause, columnClauseFor, tidyAnds,
-    toggleCollapsed, setSql, setColFilter, setActiveGraph, setHighlight, clearAllFilters,
+    toggleCollapsed, setSql, setColFilter, setActiveGraph, toggleCheckbox,
+    resolveActiveGraph, setHighlight, clearAllFilters,
   };
 }

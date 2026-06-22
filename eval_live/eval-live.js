@@ -54,11 +54,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy) {
     onSql: (n, val) => setState((s) => setSql(s, n, val)),
     onColFilter: (n, col, val) => setState((s) => setColFilter(s, n, col, val)),
     onHighlight: (n, mode) => setState((s) => setHighlight(s, n, mode)),
-    onCheckbox: (n, col, checked, all) => setState((s) => {
-      const ui = ensureTableUi(s, n);
-      const clause = columnClauseFor(col, checked, all);
-      return setSql(s, n, setColumnClause(ui.sql || "", col, clause));
-    }),
+    onCheckbox: (n, col, checked, all) => setState((s) => toggleCheckbox(s, n, col, checked, all)),
   };
 
   // --- persistent DOM skeleton (built once) -------------------------------
@@ -161,10 +157,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy) {
       }
     }
 
-    const names = eng.graphs.map((g) => g.name);
-    const active = (state.ui.activeGraph && names.includes(state.ui.activeGraph))
-      ? state.ui.activeGraph
-      : (names[0] || null);
+    const active = resolveActiveGraph(state);
     const btns = graphBar.querySelectorAll(".graph-btn");
     btns.forEach((b) => b.classList.toggle("active", b.textContent === active));
 
