@@ -34,16 +34,26 @@ function looksLikeSql(text) {
  * to a substring match). Runs the clause ONCE via AlaSQL. A temporary index
  * column maps AlaSQL's result copies back to the originals.
  */
-function sqlMatchSet(text, rows) {
+function sqlMatchSet(text, rows, columns) {
   const trimmed = (text || "").trim();
   if (!trimmed) return null;
   if (!looksLikeSql(trimmed)) return null;
   if (typeof alasql !== "function") return null;  // engine missing -> fallback
-  // `__el_idx` is unlikely to collide with a real column.
-  const tagged = rows.map((r, i) => ({ ...r, __el_idx: i }));
+  // AlaSQL receives only the displayed columns and their semantic cell values.
+  // Pick a synthetic identifier that cannot overwrite a caller's column.
+  columns = columns || columnsOf(rows);
+  let indexColumn = "__eval_live_row_index";
+  while (columns.includes(indexColumn)) indexColumn = "_" + indexColumn;
+  const tagged = rows.map((r, i) => {
+    const values = dictionary();
+    for (const column of columns) values[column] = cellValue(ownValue(r, column));
+    values[indexColumn] = i;
+    return values;
+  });
   try {
-    const res = alasql("SELECT __el_idx FROM ? WHERE " + trimmed, [tagged]);
-    return new Set(res.map((r) => r.__el_idx));
+    const res = alasql(`SELECT source.${indexColumn} AS ${indexColumn} FROM ? AS source WHERE ` + trimmed,
+      [tagged]);
+    return new Set(res.map((r) => ownValue(r, indexColumn)));
   } catch (e) {
     return null;  // invalid / half-typed SQL -> substring fallback
   }
@@ -59,10 +69,17 @@ function sqlQuote(v) {
   return "'" + String(v).replace(/'/g, "''") + "'";
 }
 
+// AlaSQL resolves JavaScript prototype names specially when unqualified. The
+// source alias keeps generated checkbox clauses safe for those column ids.
+function sqlColumnReference(col) {
+  return Object.prototype.hasOwnProperty.call(Object.prototype, col) ? `source.${col}` : col;
+}
+
 // The clause a set of checked values produces for a column. Empty checkedSet
 // (or all-checked, handled by caller) means "no constraint" -> "".
 function clauseForColumn(col, checkedValues) {
   if (checkedValues.length === 0) return "";
-  if (checkedValues.length === 1) return `${col} = ${sqlQuote(checkedValues[0])}`;
-  return `${col} IN (${checkedValues.map(sqlQuote).join(", ")})`;
+  const reference = sqlColumnReference(col);
+  if (checkedValues.length === 1) return `${reference} = ${sqlQuote(checkedValues[0])}`;
+  return `${reference} IN (${checkedValues.map(sqlQuote).join(", ")})`;
 }

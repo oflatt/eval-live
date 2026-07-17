@@ -27,7 +27,7 @@ _JS_MODULES = (
     "state.js",          # single state object: pure derivations, reducers, clause helpers
     "table-view.js",     # buildTableView: persistent per-table DOM + sync(state)
     "graph-engine.js",   # createEngine: memoized async Pyodide effects (graphs/tables/narrowing)
-    "eval-live.js",      # initEvalLive: owns state, setState -> render(state)
+    "eval-live.js",      # initEvalLive / initEvalLiveTables / initEvalLiveCatalog
 )
 
 

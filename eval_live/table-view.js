@@ -15,9 +15,9 @@
    rows are never rebuilt, so it persists naturally without bloating state. */
 
 /**
- * @param {string} name        table name (key into state.ui.tables)
+ * @param {string} name        displayed table name
  * @param {Array}  rows         the table's rows (fixed for the life of the view)
- * @param {string} kind         "raw" | "computed"
+ * @param {string} kind         "raw" | "computed" | "precomputed"
  * @param {boolean} filterable  show the filter toolbar + per-column inputs
  * @param {string} [description] clarifying subtitle
  * @param {Object} handlers     { onToggleCollapse(name), onSql(name,val),
@@ -26,13 +26,21 @@
  * @param {Array} [optionRows]   rows the checkbox dropdowns enumerate (the
  *                               UNFILTERED rows, so options don't vanish as the
  *                               displayed `rows` narrow). Defaults to `rows`.
- * @returns {{name, kind, rows, section, sync(state)}}
+ * @param {string} [id]          stable state key; defaults to `name` for the
+ *                               existing raw/computed table APIs
+ * @param {Array} [columns]       ordered `{id, name, alignment?}` descriptors;
+ *                               inferred from row keys when omitted
+ * @returns {{id, name, kind, rows, columns, section, sync(state)}}
  */
-function buildTableView(name, rows, kind, filterable, description, handlers, optionRows) {
+function buildTableView(name, rows, kind, filterable, description, handlers, optionRows, id, columns) {
   optionRows = optionRows || rows;
+  const stateKey = id === undefined ? name : id;
   // Columns from the unfiltered optionRows, not the narrowed `rows`, so a column
   // doesn't vanish when filtering leaves only rows that omit its key.
-  const cols = columnsOf(optionRows);
+  columns = columns == null
+    ? columnsOf(optionRows).map((columnId) => ({ id: columnId, name: columnId, alignment: null }))
+    : columns;
+  const cols = columns.map((column) => column.id);
 
   const section = document.createElement("div");
   section.className = "table-section";
@@ -51,7 +59,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
   const rowCount = document.createElement("span");
   rowCount.className = "row-count";
   heading.appendChild(rowCount);
-  heading.addEventListener("click", () => handlers.onToggleCollapse(name));
+  heading.addEventListener("click", () => handlers.onToggleCollapse(stateKey));
   section.appendChild(heading);
 
   if (description) {
@@ -74,7 +82,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     opt.textContent = text;
     hlSelect.appendChild(opt);
   }
-  hlSelect.addEventListener("change", () => handlers.onHighlight(name, hlSelect.value));
+  hlSelect.addEventListener("change", () => handlers.onHighlight(stateKey, hlSelect.value));
   hlLabel.appendChild(hlSelect);
   controls.appendChild(hlLabel);
   section.appendChild(controls);
@@ -93,7 +101,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     sqlInput.className = "sql-filter-input";
     sqlInput.placeholder =
       "SQL filter, e.g.  backend IN ('feldera','flowlog') AND mode = 'proofs'   (plain text = substring match)";
-    sqlInput.addEventListener("input", () => handlers.onSql(name, sqlInput.value));
+    sqlInput.addEventListener("input", () => handlers.onSql(stateKey, sqlInput.value));
     sqlWrap.appendChild(sqlInput);
     const hint = document.createElement("span");
     hint.className = "sql-filter-hint";
@@ -112,7 +120,8 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     // displayed rows narrow.
     const dropdowns = document.createElement("div");
     dropdowns.className = "checkbox-dropdowns";
-    for (const col of cols) {
+    for (const column of columns) {
+      const col = column.id;
       const values = distinctScalarValues(optionRows, col);
       if (values === null) continue;         // non-scalar column; no dropdown
       if (values.length >= 30) continue;     // too many to checkbox; use typed SQL
@@ -120,7 +129,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
       const details = document.createElement("details");
       details.className = "checkbox-dropdown";
       const summary = document.createElement("summary");
-      summary.textContent = `${col} (${values.length})`;
+      summary.textContent = `${column.name} (${values.length})`;
       details.appendChild(summary);
 
       const list = document.createElement("div");
@@ -141,7 +150,7 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
         boxes.push(box);
         cb.addEventListener("change", () => {
           const checked = boxes.filter((b) => b.cb.checked).map((b) => b.value);
-          handlers.onCheckbox(name, col, checked, values);
+          handlers.onCheckbox(stateKey, col, checked, values);
         });
       }
       details.appendChild(list);
@@ -160,27 +169,30 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
   const thExpand = document.createElement("th");
   thExpand.className = "expand-col";
   headerRow.appendChild(thExpand);
-  for (const col of cols) {
+  for (const column of columns) {
     const th = document.createElement("th");
-    th.textContent = col;
+    th.textContent = column.name;
+    if (column.alignment) th.style.textAlign = column.alignment;
     headerRow.appendChild(th);
   }
   thead.appendChild(headerRow);
 
-  const colInputs = {};         // col -> <input>
+  const colInputs = dictionary(); // column id -> <input>
   if (filterable) {
     const filterRow = document.createElement("tr");
     filterRow.className = "filter-row";
     const filterExpandTh = document.createElement("th");
     filterExpandTh.className = "expand-col";
     filterRow.appendChild(filterExpandTh);
-    for (const col of cols) {
+    for (const column of columns) {
+      const col = column.id;
       const th = document.createElement("th");
+      if (column.alignment) th.style.textAlign = column.alignment;
       const input = document.createElement("input");
       input.type = "text";
       input.className = "filter-input";
       input.placeholder = "filter...";
-      input.addEventListener("input", () => handlers.onColFilter(name, col, input.value));
+      input.addEventListener("input", () => handlers.onColFilter(stateKey, col, input.value));
       colInputs[col] = input;
       th.appendChild(input);
       filterRow.appendChild(th);
@@ -205,10 +217,12 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     });
     tdBtn.appendChild(btn);
     tr.appendChild(tdBtn);
-    const tds = {};
-    for (const col of cols) {
+    const tds = dictionary();
+    for (const column of columns) {
+      const col = column.id;
       const td = document.createElement("td");
-      const val = row[col];
+      if (column.alignment) td.style.textAlign = column.alignment;
+      const val = ownValue(row, col);
       td.textContent = cellText(val);
       // Styled cell ({text, style}) -> inline visual style (color/bold/dim).
       if (val !== null && typeof val === "object" && val.style) {
@@ -236,14 +250,16 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
   }
 
   function sync(state) {
-    const ui = state.ui.tables[name] || makeTableUi(kind);
+    const ui = ownValue(state.ui.tables, stateKey) || makeTableUi(kind);
 
     section.classList.toggle("collapsed", !!ui.collapsed);
 
     if (filterable) {
       setInputValue(sqlInput, ui.sql || "");
       for (const col of cols) {
-        if (colInputs[col]) setInputValue(colInputs[col], ui.colFilters[col] || "");
+        if (hasOwn(colInputs, col)) {
+          setInputValue(colInputs[col], ownValue(ui.colFilters, col) || "");
+        }
       }
       // Checkboxes are a view of ui.sql: check the values the SQL constrains to
       // (no recognizable clause for a column => all checked = "no constraint").
@@ -262,7 +278,8 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
     // computed->raw narrowing feedback.
     const idxs = visibleRowIndices(rows, cols, ui);
     let allowed = null;
-    if (kind === "raw" && state.engine.narrowing && state.engine.narrowing[name]) {
+    if (kind === "raw" && state.engine.narrowing &&
+        hasOwn(state.engine.narrowing, name) && state.engine.narrowing[name]) {
       allowed = new Set(state.engine.narrowing[name].map((r) => JSON.stringify(r)));
     }
     const shown = new Array(rows.length).fill(false);
@@ -285,5 +302,5 @@ function buildTableView(name, rows, kind, filterable, description, handlers, opt
       : `(${visible}/${rows.length} rows)`;
   }
 
-  return { name, kind, rows, section, sync };
+  return { id: stateKey, name, kind, rows, columns, section, sync };
 }

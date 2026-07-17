@@ -27,13 +27,13 @@ for embedding into a self-contained HTML page:
 import eval_live
 
 eval_live.css()          # CSS stylesheet
-eval_live.js()           # JavaScript library (defines initEvalLive)
+eval_live.js()           # JavaScript library (defines the entry points below)
 eval_live.pyodide_lib()  # eval_live.py source for Pyodide runtime
 ```
 
 ## JavaScript API
 
-The JS library exposes a single entry point:
+The JS library exposes the existing raw/computed-data entry point:
 
 ```js
 initEvalLive(container, data, name, graphScript, evalLivePy)
@@ -44,6 +44,101 @@ initEvalLive(container, data, name, graphScript, evalLivePy)
 - **name**: project name shown in the heading
 - **graphScript** (optional): Python script that builds an `eval_live.Registry`
 - **evalLivePy** (optional): source of the `eval_live.py` library (from `eval_live.pyodide_lib()`)
+
+### Precomputed table catalogs
+
+Use `initEvalLiveTables` when another system has already computed the report
+tables. It renders the supplied descriptors directly and never starts the graph
+engine or loads Pyodide:
+
+```js
+initEvalLiveTables("eval-live-root", [
+  {
+    id: "wall-time-summary",
+    name: "Wall time",
+    section: "Benchmark Summary",
+    caption: "Lower is better.",
+    columns: [
+      {id: "target", name: "Target", alignment: "left"},
+      {id: "duration", name: "Wall time", alignment: "right"},
+    ],
+    rows: [
+      {
+        target: "candidate",
+        duration: {
+          value: 0.118,
+          text: "118 ms",
+          style: {color: "green"},
+        },
+      },
+    ],
+  },
+], "Benchmark Report");
+```
+
+Descriptors and their `rows` retain their input order. Every descriptor needs a
+unique, stable `id`; `name` is display-only, so multiple tables may have the
+same name without sharing filter or collapse state. `section` and `caption` are
+optional.
+
+The optional `columns` array fixes the displayed columns and their order, even
+when `rows` is empty. Each column has a unique stable `id`, a display-only
+`name`, and an optional `alignment` of `left`, `center`, or `right`. Row objects
+and SQL filters use column ids; headings use names, which may be duplicated.
+Extra row properties are not displayed or available to that table's SQL filter.
+When `columns` is omitted, ids and names are inferred from the first appearance
+of each row key, preserving the original API's behavior. AlaSQL accepts ordinary
+ids directly; JavaScript prototype names can be qualified with the built-in
+`source` alias, for example `source.constructor < 10`.
+
+Choose explicit column ids as ASCII SQL identifiers (`[A-Za-z_][A-Za-z0-9_]*`)
+that are not SQL keywords; put unrestricted human text in `name`. This keeps
+typed SQL and checkbox-generated clauses unambiguous. JavaScript prototype
+names such as `constructor` are supported through the `source` qualification
+shown above.
+
+A cell may be a primitive, the existing `{text, style}` styled-cell shape, or
+`{value, text, style}`. The latter shape is recognized only when both `value`
+and `text` are own properties, so ordinary objects that happen to contain a
+`value` field retain their old behavior. Display and substring filters use
+`text`; SQL comparisons and numeric highlighting use `value`. `style` remains
+optional and visual-only. The table filters only change the browser display:
+this API does not recompute the supplied catalog.
+
+Precomputed tables start with numeric highlighting set to `none`, because a
+single report row often mixes unlike units. Viewers can still choose `lowest`
+or `highest` from an individual table's highlight control when that comparison
+is meaningful.
+
+When tables and explanatory messages must retain one exact document order, use
+`initEvalLiveCatalog` with the report's section hierarchy. Table blocks use the
+same descriptor fields as above plus `kind: "table"`; message blocks are inert
+text with `kind: "message"`, a stable `id`, `text`, and optional `title`, `tone`,
+and `layout`:
+
+```js
+initEvalLiveCatalog("eval-live-root", [
+  {
+    id: "timing",
+    title: "Engine Timing",
+    blocks: [
+      {kind: "table", id: "summary", name: "Summary", rows: results},
+      {
+        kind: "message",
+        id: "timing-note",
+        text: "Other is wall time minus recorded phases.",
+        tone: "muted",
+        layout: "caption",
+      },
+    ],
+  },
+], "Benchmark Report");
+```
+
+Section and block order are preserved, including sections containing only
+messages. Messages are rendered with `textContent`; they do not receive table
+filters or enter table UI state. Built-in tones are `default`, `positive`,
+`negative`, `warning`, `error`, and `muted`; layouts are `text` and `caption`.
 
 ## Graphs and computed tables
 
@@ -146,8 +241,9 @@ event -> setState(reducer) -> render(state)  [+ engine.tick(state)]
   and all computed tables. The narrowing *selection* and the checkbox *options*
   are taken from the unfiltered tables (`computedUnfiltered`), so options don't
   vanish as the displayed rows shrink, and there is no recompute cycle.
-- **eval-live.js** — `initEvalLive`: owns the state, wires reducers, and
-  `render(state)` reconciles the whole page (graph bar, raw + computed tables).
+- **eval-live.js** — `initEvalLive`, `initEvalLiveTables`, and
+  `initEvalLiveCatalog`: own the state, wire reducers, and reconcile graph, raw,
+  computed, and precomputed report views.
 
 ## Tests
 
@@ -156,8 +252,7 @@ Pure-JS unit + DOM-smoke tests, no npm/jsdom (they run the browser modules in a
 
 ```bash
 node test/state.test.mjs   # state core: filtering, reducers, SQL-clause helpers
-node test/dom.test.mjs      # initEvalLive end-to-end: filter / collapse / checkbox / clear
+node test/dom.test.mjs      # all public JS APIs: DOM wiring and AlaSQL filtering
 ```
 
-The AlaSQL row-evaluation path and the Pyodide engine are exercised in the
-browser, not in these tests.
+The Pyodide engine is exercised in the browser, not in these tests.

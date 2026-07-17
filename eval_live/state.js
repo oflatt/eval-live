@@ -16,16 +16,28 @@
 
 // ---- construction ---------------------------------------------------------
 
+function dictionary() {
+  return Object.create(null);
+}
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function ownValue(object, key) {
+  return hasOwn(object, key) ? object[key] : undefined;
+}
+
 function makeTableUi(kind) {
   // collapsed: minimized to just its heading. sql: the SQL filter box text
   // (also the single source of truth the checkboxes are derived from).
   // colFilters: per-column substring inputs, ANDed on top of sql.
   // highlight: which numeric cell to mark per row -- "lowest" | "highest" | "none".
-  return { kind: kind, collapsed: false, sql: "", colFilters: {}, highlight: "lowest" };
+  return { kind: kind, collapsed: false, sql: "", colFilters: dictionary(), highlight: "lowest" };
 }
 
 function makeState(data, projectName, graphScript, evalLivePy) {
-  const tables = {};
+  const tables = dictionary();
   for (const name of Object.keys(data)) {
     const rows = data[name];
     if (Array.isArray(rows) && rows.length > 0) tables[name] = makeTableUi("raw");
@@ -60,15 +72,29 @@ function makeState(data, projectName, graphScript, evalLivePy) {
 // Ensure a ui entry exists for a (possibly computed) table; returns it. Computed
 // tables are not known until Pyodide runs, so their ui is created lazily.
 function ensureTableUi(state, name, kind) {
-  if (!state.ui.tables[name]) state.ui.tables[name] = makeTableUi(kind || "computed");
+  if (!hasOwn(state.ui.tables, name)) state.ui.tables[name] = makeTableUi(kind || "computed");
   return state.ui.tables[name];
 }
 
 // ---- pure helpers ---------------------------------------------------------
 
-// Cell -> text, matching the historic rendering exactly (null -> "null" via
-// JSON.stringify; undefined -> ""). A styled cell ({text, style}) renders its
-// text; the style drives a CSS class in the table view, not the text.
+// The value/text shape is deliberately strict so an ordinary object that
+// happens to contain a `value` property keeps its historic object semantics.
+function isValueTextCell(val) {
+  return val !== null && typeof val === "object" &&
+    hasOwn(val, "value") && hasOwn(val, "text");
+}
+
+// A structured cell may separate its semantic value from its display text.
+// SQL filtering and numeric highlighting use `value`; primitives, ordinary
+// objects, and the historic {text, style} cell shape retain their old semantics.
+function cellValue(val) {
+  return isValueTextCell(val) ? val.value : val;
+}
+
+// Cell -> display/filter text, matching the historic rendering exactly (null
+// -> "null" via JSON.stringify; undefined -> ""). A structured cell renders
+// its `text`; `style` drives visual attributes in the table view.
 function cellText(val) {
   if (val === undefined) return "";
   if (val !== null && typeof val === "object" && "text" in val) {
@@ -99,21 +125,21 @@ function applyCellStyle(td, style) {
 // across all columns -- identical semantics to the old applyFilters().
 function visibleRowIndices(rows, cols, ui) {
   const sqlText = (ui.sql || "").trim();
-  const sqlSet = sqlText ? sqlMatchSet(sqlText, rows) : null;
+  const sqlSet = sqlText ? sqlMatchSet(sqlText, rows, cols) : null;
   const sqlSubstr = (sqlText && !sqlSet) ? sqlText.toLowerCase() : null;
   const out = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
     let show = true;
     for (const col of cols) {
-      const q = (ui.colFilters[col] || "").toLowerCase();
+      const q = (ownValue(ui.colFilters, col) || "").toLowerCase();
       if (!q) continue;
-      if (!cellText(row[col]).toLowerCase().includes(q)) { show = false; break; }
+      if (!cellText(ownValue(row, col)).toLowerCase().includes(q)) { show = false; break; }
     }
     if (show && sqlSet) {
       if (!sqlSet.has(i)) show = false;
     } else if (show && sqlSubstr) {
-      const joined = cols.map((c) => cellText(row[c])).join(" ").toLowerCase();
+      const joined = cols.map((c) => cellText(ownValue(row, c))).join(" ").toLowerCase();
       if (!joined.includes(sqlSubstr)) show = false;
     }
     if (show) out.push(i);
@@ -131,10 +157,10 @@ function visibleRows(rows, ui) {
 // raw filters feed computed tables, computed filters feed raw display, and the
 // two never chase each other.
 function rawFilteredData(state) {
-  const out = {};
+  const out = dictionary();
   for (const name of Object.keys(state.data)) {
     const rows = state.data[name];
-    const ui = state.ui.tables[name];
+    const ui = ownValue(state.ui.tables, name);
     if (!Array.isArray(rows) || !rows.length || !ui || ui.kind !== "raw") continue;
     out[name] = visibleRows(rows, ui);
   }
@@ -151,10 +177,10 @@ function effectiveRawData(state) {
   const fd = rawFilteredData(state);
   const narrowing = state.engine.narrowing;
   if (!narrowing) return fd;
-  const out = {};
+  const out = dictionary();
   for (const name of Object.keys(fd)) {
-    const allowedRows = narrowing[name];
-    if (allowedRows) {
+    if (hasOwn(narrowing, name) && narrowing[name]) {
+      const allowedRows = narrowing[name];
       const allowed = narrowedKeySet(allowedRows);
       out[name] = fd[name].filter((r) => allowed.has(rowKey(r)));
     } else {
@@ -173,7 +199,7 @@ function computedFilterInputs(state) {
   const out = [];
   for (const t of state.engine.computedUnfiltered) {
     if (!t.hasFilterSource) continue;
-    const ui = state.ui.tables[t.name];
+    const ui = ownValue(state.ui.tables, t.name);
     if (!ui) continue;
     const active = (ui.sql && ui.sql.trim()) || Object.keys(ui.colFilters).length > 0;
     if (!active) continue;
@@ -188,7 +214,7 @@ function computedFilterInputs(state) {
 function distinctScalarValues(rows, col) {
   const distinct = new Set();
   for (const r of rows) {
-    const v = r[col];
+    const v = ownValue(r, col);
     if (v !== undefined && v !== null && typeof v === "object") return null;
     distinct.add(v === undefined || v === null ? "" : String(v));
   }
@@ -215,6 +241,7 @@ function narrowedKeySet(rows) {
 // A cell counts as numeric if it is a finite number or a string that parses as
 // one (results.json often carries numbers as strings).
 function isNumericValue(v) {
+  v = cellValue(v);
   if (typeof v === "number") return isFinite(v);
   if (typeof v === "string" && v.trim() !== "") return isFinite(Number(v));
   return false;
@@ -228,7 +255,10 @@ function bestNumericCols(row, cols, mode) {
   if (mode === "none") return new Set();
   const highest = mode === "highest";
   const nums = [];
-  for (const col of cols) if (isNumericValue(row[col])) nums.push({ col, n: Number(row[col]) });
+  for (const col of cols) {
+    const value = cellValue(ownValue(row, col));
+    if (isNumericValue(value)) nums.push({ col, n: Number(value) });
+  }
   if (nums.length < 2) return new Set();
   let best = highest ? -Infinity : Infinity;
   for (const x of nums) best = highest ? Math.max(best, x.n) : Math.min(best, x.n);
@@ -245,8 +275,9 @@ function bestNumericCols(row, cols, mode) {
 // null if there is no such clause for `col`.
 function extractColumnValues(text, col) {
   const c = col.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const inRe = new RegExp(`\\b${c}\\s+IN\\s*\\(([^)]*)\\)`, "i");
-  const eqRe = new RegExp(`\\b${c}\\s*=\\s*'((?:[^']|'')*)'`, "i");
+  const reference = `(?:source\\.)?\\b${c}`;
+  const inRe = new RegExp(`${reference}\\s+IN\\s*\\(([^)]*)\\)`, "i");
+  const eqRe = new RegExp(`${reference}\\s*=\\s*'((?:[^']|'')*)'`, "i");
   let m = inRe.exec(text);
   if (m) {
     const vals = [];
@@ -274,8 +305,9 @@ function tidyAnds(text) {
 // `sql`, healing one adjacent AND so no dangling glue remains.
 function removeColumnClause(sql, col) {
   const c = col.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const inRe = new RegExp(`(\\s*AND\\s+)?\\b${c}\\s+IN\\s*\\([^)]*\\)(\\s+AND\\s*)?`, "i");
-  const eqRe = new RegExp(`(\\s*AND\\s+)?\\b${c}\\s*=\\s*'(?:[^']|'')*'(\\s+AND\\s*)?`, "i");
+  const reference = `(?:source\\.)?\\b${c}`;
+  const inRe = new RegExp(`(\\s*AND\\s+)?${reference}\\s+IN\\s*\\([^)]*\\)(\\s+AND\\s*)?`, "i");
+  const eqRe = new RegExp(`(\\s*AND\\s+)?${reference}\\s*=\\s*'(?:[^']|'')*'(\\s+AND\\s*)?`, "i");
   let text = sql;
   for (const re of [inRe, eqRe]) {
     text = text.replace(re, (full, before, after) => (before && after ? " AND " : ""));
@@ -315,7 +347,7 @@ function setSql(state, name, sql) {
 
 function setColFilter(state, name, col, value) {
   const ui = ensureTableUi(state, name);
-  const cur = ui.colFilters[col] || "";
+  const cur = ownValue(ui.colFilters, col) || "";
   if (cur === (value || "")) return false;
   if (value) ui.colFilters[col] = value; else delete ui.colFilters[col];
   return true;
@@ -357,7 +389,7 @@ function clearAllFilters(state) {
   for (const name of Object.keys(state.ui.tables)) {
     const ui = state.ui.tables[name];
     if (ui.sql) { ui.sql = ""; changed = true; }
-    if (Object.keys(ui.colFilters).length) { ui.colFilters = {}; changed = true; }
+    if (Object.keys(ui.colFilters).length) { ui.colFilters = dictionary(); changed = true; }
   }
   return changed;
 }
@@ -365,7 +397,8 @@ function clearAllFilters(state) {
 // Export for node tests only; harmless in the browser (no module global there).
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    makeState, makeTableUi, ensureTableUi, cellText, columnsOf,
+    dictionary, hasOwn, ownValue, makeState, makeTableUi, ensureTableUi,
+    isValueTextCell, cellValue, cellText, columnsOf,
     visibleRowIndices, visibleRows, rawFilteredData, effectiveRawData,
     computedFilterInputs, distinctScalarValues, stableKey, rowKey, narrowedKeySet,
     isNumericValue, bestNumericCols,

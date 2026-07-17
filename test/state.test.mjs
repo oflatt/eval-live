@@ -3,10 +3,9 @@
    two browser modules inside a node:vm context (where their top-level function
    declarations become context globals) and assert against them directly.
 
-   The real AlaSQL evaluation path needs a browser-y global and is exercised
-   manually; here `alasql` is absent, so sqlMatchSet() returns null and SQL text
-   falls back to substring matching -- which is itself a documented behavior we
-   assert on. Run: `node test/state.test.mjs`. */
+   The DOM suite loads AlaSQL; here it is absent, so sqlMatchSet() returns null
+   and SQL text falls back to substring matching -- itself documented behavior
+   that we assert on. Run: `node test/state.test.mjs`. */
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
 import assert from "node:assert/strict";
@@ -63,6 +62,47 @@ test("cellText matches historic rendering (null -> 'null', undefined -> '')", ()
   assert.equal(ctx.cellText(null), "null");
   assert.equal(ctx.cellText({ a: 1 }), '{"a":1}');
   assert.equal(ctx.cellText(42), "42");
+  assert.equal(ctx.cellText({ value: 0.12, text: "120 ms" }), "120 ms");
+  assert.equal(ctx.cellValue({ value: 0.12, text: "120 ms" }), 0.12);
+  const ordinary = { value: 0.12, unit: "seconds" };
+  assert.equal(ctx.isValueTextCell(ordinary), false);
+  assert.equal(ctx.cellValue(ordinary), ordinary);
+  assert.equal(ctx.cellText(ordinary), '{"value":0.12,"unit":"seconds"}');
+  const inheritedText = Object.assign(Object.create({ text: "inherited" }), { value: 1 });
+  assert.equal(ctx.isValueTextCell(inheritedText), false);
+  assert.equal(ctx.cellValue(inheritedText), inheritedText);
+  const historic = { text: "faster", style: { color: "green" } };
+  assert.equal(ctx.cellValue(historic), historic);
+});
+
+test("reserved table and column keys remain own, independent state entries", () => {
+  const data = JSON.parse(`{
+    "__proto__": [
+      {"constructor": "first", "__proto__": "needle"},
+      {"constructor": "second"}
+    ],
+    "constructor": [{"__proto__": "other"}]
+  }`);
+  const state = ctx.makeState(data);
+  assert.equal(Object.getPrototypeOf(state.ui.tables), null);
+  assert.equal(ctx.hasOwn(state.ui.tables, "__proto__"), true);
+  assert.equal(ctx.hasOwn(state.ui.tables, "constructor"), true);
+
+  ctx.setColFilter(state, "__proto__", "__proto__", "needle");
+  assert.equal(Object.getPrototypeOf(state.ui.tables.__proto__.colFilters), null);
+  assert.equal(ctx.hasOwn(state.ui.tables.__proto__.colFilters, "__proto__"), true);
+  ctx.setSql(state, "constructor", "other");
+
+  const filtered = ctx.rawFilteredData(state);
+  assert.equal(Object.getPrototypeOf(filtered), null);
+  assert.deepEqual(Object.keys(filtered), ["__proto__", "constructor"]);
+  assert.equal(filtered.__proto__.length, 1);
+  assert.equal(filtered.constructor.length, 1);
+
+  const missingReservedKey = [{ constructor: "present" }, {}];
+  const ui = ctx.makeTableUi("raw");
+  ctx.setColFilter({ ui: { tables: { t: ui } } }, "t", "constructor", "function Object");
+  eq(ctx.visibleRowIndices(missingReservedKey, ["constructor"], ui), []);
 });
 
 test("rawFilteredData applies each raw table's ui and skips non-raw/empty", () => {
@@ -167,7 +207,9 @@ test("distinctScalarValues: sorted distinct, null for non-scalar columns", () =>
 });
 
 test("isNumericValue accepts numbers and numeric strings only", () => {
-  for (const v of [3, 0, -2.5, "4", " 1.0 ", "1e3"]) assert.equal(ctx.isNumericValue(v), true);
+  for (const v of [3, 0, -2.5, "4", " 1.0 ", "1e3", { value: 8, text: "8 ms" }]) {
+    assert.equal(ctx.isNumericValue(v), true);
+  }
   for (const v of ["", "abc", null, undefined, {}, true, NaN, Infinity]) assert.equal(ctx.isNumericValue(v), false);
 });
 
@@ -178,6 +220,9 @@ test("bestNumericCols: lowest (default), highest, none, ties, >= 2 numbers", () 
   eq([...ctx.bestNumericCols({ a: 2, b: 2, c: 9 }, ["a", "b", "c"], "lowest")], ["a", "b"]); // ties
   eq([...ctx.bestNumericCols({ a: 5, name: "x" }, ["a", "name"], "lowest")], []);            // one number
   eq([...ctx.bestNumericCols({ a: "3", b: "1" }, ["a", "b"], "highest")], ["a"]);            // numeric strings
+  eq([...ctx.bestNumericCols(
+    { a: { value: 8, text: "8 ms" }, b: { value: 10, text: "10 ms" } },
+    ["a", "b"], "lowest")], ["a"]);
 });
 
 test("setHighlight reducer (default lowest, idempotent)", () => {

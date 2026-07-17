@@ -61,7 +61,7 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
   }
 
   function setData(filteredData) {
-    pyodide.globals.set("__eval_live_data__", pyodide.toPy(filteredData));
+    pyodide.globals.set("__eval_live_data__", pyodide.toPy(plainInteropValue(filteredData)));
   }
 
   async function runGraphs(filteredData) {
@@ -88,13 +88,13 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
   }
 
   async function runNarrowing(tableFilters, data) {
-    pyodide.globals.set("__eval_live_data__", pyodide.toPy(data));
-    pyodide.globals.set("__eval_live_table_filters__", pyodide.toPy(tableFilters));
+    pyodide.globals.set("__eval_live_data__", pyodide.toPy(plainInteropValue(data)));
+    pyodide.globals.set("__eval_live_table_filters__", pyodide.toPy(plainInteropValue(tableFilters)));
     const proxy = await pyodide.runPythonAsync(
       "import eval_live; eval_live.registry.apply_table_filters(__eval_live_table_filters__, __eval_live_data__)");
     const result = proxy.toJs({ create_proxies: false });
     proxy.destroy();
-    const out = {};
+    const out = dictionary();
     for (const [k, v] of result.entries()) {
       out[k] = Array.isArray(v)
         ? v.map((r) => (r instanceof Map ? Object.fromEntries(r.entries()) : r))
@@ -196,4 +196,19 @@ function createEngine(graphScript, evalLivePy, setState, extraModules = {}) {
   }
 
   return { tick };
+}
+
+// Browser state uses null-prototype dictionaries so caller-owned table names
+// such as `__proto__` remain ordinary keys. Rebuild ordinary objects only at
+// the legacy Pyodide boundary, whose conversion support varies by release.
+// Object.fromEntries creates own properties without invoking `__proto__`'s
+// legacy setter.
+function plainInteropValue(value) {
+  if (Array.isArray(value)) return value.map(plainInteropValue);
+  if (value !== null && typeof value === "object") {
+    return Object.fromEntries(
+      Object.keys(value).map((key) => [key, plainInteropValue(value[key])]),
+    );
+  }
+  return value;
 }

@@ -16,7 +16,8 @@
   margin-bottom: 1.5rem;
 }
 
-.eval-live .raw-tables-header {
+.eval-live .raw-tables-header,
+.eval-live .report-section-heading {
   font-size: 1.4rem;
   font-weight: 700;
   margin-top: 2rem;
@@ -335,6 +336,27 @@
 .eval-live .checkbox-item input[type="checkbox"] {
   margin: 0;
 }
+
+/* Inert explanatory blocks in precomputed report catalogs. */
+.eval-live .report-message {
+  border-left: 3px solid #888;
+  margin: 0.5rem 0 1.25rem;
+  padding: 0.5rem 0.75rem;
+}
+
+.eval-live .report-message.layout-caption {
+  border-left: 0;
+  color: #666;
+  font-size: 0.9rem;
+  font-style: italic;
+  padding-left: 0;
+}
+
+.eval-live .report-message.tone-warning { border-color: #b7791f; }
+.eval-live .report-message.tone-error,
+.eval-live .report-message.tone-negative { border-color: #c53030; }
+.eval-live .report-message.tone-positive { border-color: #2f855a; }
+.eval-live .report-message.tone-muted { opacity: 0.8; }
 
 /* Graphs */
 .eval-live .graph-section {

@@ -23,6 +23,8 @@ const TABLE_DESCRIPTIONS = {
   skipped: "Files excluded up front (not benchmarked) and why — e.g. "
     + "unsupported by the term encoding, or no bridge-normal reference.",
 };
+const REPORT_MESSAGE_TONES = new Set(["default", "positive", "negative", "warning", "error", "muted"]);
+const REPORT_MESSAGE_LAYOUTS = new Set(["text", "caption"]);
 
 /**
  * Render evaluation tables (and, when a graph script is supplied, Pyodide graphs
@@ -36,6 +38,193 @@ const TABLE_DESCRIPTIONS = {
  *   Python modules written to the Pyodide filesystem, importable by graphScript
  */
 function initEvalLive(container, data, name, graphScript, evalLivePy, extraModules = {}) {
+  return initEvalLiveApp(container, data, name, graphScript, evalLivePy, extraModules, []);
+}
+
+/**
+ * Render an ordered catalog of already-computed, independently filterable
+ * tables. This entry point does not create the graph engine or load Pyodide.
+ *
+ * Each descriptor is `{id, name, rows, section?, caption?, columns?}`. `id` is
+ * the unique, stable UI-state key; duplicate displayed `name` values are
+ * allowed. Optional columns are ordered `{id, name, alignment?}` descriptors.
+ * Descriptor, column, and row order are preserved.
+ *
+ * @param {HTMLElement|string} container
+ * @param {Array} tables
+ * @param {string} [name] - project name shown in the heading
+ */
+function initEvalLiveTables(container, tables, name) {
+  const normalized = normalizePrecomputedTables(tables);
+  const sections = [];
+  for (const table of normalized) {
+    const previous = sections[sections.length - 1];
+    if (!previous || previous.title !== table.section) {
+      sections.push({ id: `tables-${sections.length}`, title: table.section, blocks: [] });
+    }
+    sections[sections.length - 1].blocks.push(table);
+  }
+  return initEvalLiveApp(container, {}, name, null, null, {}, sections);
+}
+
+/**
+ * Render an ordered, already-computed report catalog without Pyodide.
+ *
+ * Sections are `{id, title?, blocks}`. Blocks are either table descriptors with
+ * `kind: "table"` and the same fields accepted by `initEvalLiveTables`, or inert
+ * messages `{kind: "message", id, title?, text, tone?, layout?}`. Section and
+ * block order are preserved, including sections that contain only messages.
+ *
+ * @param {HTMLElement|string} container
+ * @param {Array} sections
+ * @param {string} [name] - project name shown in the heading
+ */
+function initEvalLiveCatalog(container, sections, name) {
+  return initEvalLiveApp(container, {}, name, null, null, {}, normalizePrecomputedCatalog(sections));
+}
+
+function normalizePrecomputedTables(tables) {
+  if (!Array.isArray(tables)) throw new TypeError("tables must be an array");
+  const ids = new Set();
+  return tables.map((table, tableIndex) => {
+    if (table === null || typeof table !== "object" || Array.isArray(table)) {
+      throw new TypeError(`table ${tableIndex} must be an object`);
+    }
+    const id = ownValue(table, "id");
+    const name = ownValue(table, "name");
+    const rows = ownValue(table, "rows");
+    const section = ownValue(table, "section");
+    const caption = ownValue(table, "caption");
+    const columns = ownValue(table, "columns");
+    if (typeof id !== "string" || id.length === 0) {
+      throw new TypeError(`table ${tableIndex} id must be a non-empty string`);
+    }
+    if (ids.has(id)) throw new TypeError(`duplicate table id: ${id}`);
+    ids.add(id);
+    if (typeof name !== "string" || name.length === 0) {
+      throw new TypeError(`table ${id} name must be a non-empty string`);
+    }
+    if (!Array.isArray(rows)) throw new TypeError(`table ${id} rows must be an array`);
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex++) {
+      const row = rows[rowIndex];
+      if (row === null || typeof row !== "object" || Array.isArray(row)) {
+        throw new TypeError(`table ${id} row ${rowIndex} must be an object`);
+      }
+    }
+    if (section != null && typeof section !== "string") {
+      throw new TypeError(`table ${id} section must be a string`);
+    }
+    if (caption != null && typeof caption !== "string") {
+      throw new TypeError(`table ${id} caption must be a string`);
+    }
+    return {
+      kind: "table",
+      id,
+      name,
+      rows,
+      section: section || null,
+      caption: caption || null,
+      columns: normalizePrecomputedColumns(columns, id),
+    };
+  });
+}
+
+function normalizePrecomputedCatalog(sections) {
+  if (!Array.isArray(sections)) throw new TypeError("sections must be an array");
+  const sectionIds = new Set();
+  const blockIds = new Set();
+  return sections.map((section, sectionIndex) => {
+    if (section === null || typeof section !== "object" || Array.isArray(section)) {
+      throw new TypeError(`section ${sectionIndex} must be an object`);
+    }
+    const id = ownValue(section, "id");
+    const title = ownValue(section, "title");
+    const blocks = ownValue(section, "blocks");
+    if (typeof id !== "string" || id.length === 0) {
+      throw new TypeError(`section ${sectionIndex} id must be a non-empty string`);
+    }
+    if (sectionIds.has(id)) throw new TypeError(`duplicate section id: ${id}`);
+    sectionIds.add(id);
+    if (title != null && typeof title !== "string") {
+      throw new TypeError(`section ${id} title must be a string`);
+    }
+    if (!Array.isArray(blocks)) throw new TypeError(`section ${id} blocks must be an array`);
+    return {
+      id,
+      title: title || null,
+      blocks: blocks.map((block, blockIndex) => {
+        if (block === null || typeof block !== "object" || Array.isArray(block)) {
+          throw new TypeError(`section ${id} block ${blockIndex} must be an object`);
+        }
+        const blockId = ownValue(block, "id");
+        const kind = ownValue(block, "kind");
+        if (typeof blockId !== "string" || blockId.length === 0) {
+          throw new TypeError(`section ${id} block ${blockIndex} id must be a non-empty string`);
+        }
+        if (blockIds.has(blockId)) throw new TypeError(`duplicate block id: ${blockId}`);
+        blockIds.add(blockId);
+        if (kind === "table") {
+          const table = normalizePrecomputedTables([block])[0];
+          table.section = null;
+          return table;
+        }
+        if (kind !== "message") {
+          throw new TypeError(`block ${blockId} kind must be table or message`);
+        }
+        const messageTitle = ownValue(block, "title");
+        const text = ownValue(block, "text");
+        const tone = ownValue(block, "tone");
+        const layout = ownValue(block, "layout");
+        if (messageTitle != null && typeof messageTitle !== "string") {
+          throw new TypeError(`message ${blockId} title must be a string`);
+        }
+        if (typeof text !== "string") throw new TypeError(`message ${blockId} text must be a string`);
+        if (tone != null && !REPORT_MESSAGE_TONES.has(tone)) {
+          throw new TypeError(`message ${blockId} tone is not supported`);
+        }
+        if (layout != null && !REPORT_MESSAGE_LAYOUTS.has(layout)) {
+          throw new TypeError(`message ${blockId} layout is not supported`);
+        }
+        return {
+          kind: "message",
+          id: blockId,
+          title: messageTitle || null,
+          text,
+          tone: tone || "default",
+          layout: layout || "text",
+        };
+      }),
+    };
+  });
+}
+
+function normalizePrecomputedColumns(columns, tableId) {
+  if (columns == null) return null;
+  if (!Array.isArray(columns)) throw new TypeError(`table ${tableId} columns must be an array`);
+  const ids = new Set();
+  return columns.map((column, columnIndex) => {
+    if (column === null || typeof column !== "object" || Array.isArray(column)) {
+      throw new TypeError(`table ${tableId} column ${columnIndex} must be an object`);
+    }
+    const id = ownValue(column, "id");
+    const name = ownValue(column, "name");
+    const alignment = ownValue(column, "alignment");
+    if (typeof id !== "string" || id.length === 0) {
+      throw new TypeError(`table ${tableId} column ${columnIndex} id must be a non-empty string`);
+    }
+    if (ids.has(id)) throw new TypeError(`table ${tableId} has duplicate column id: ${id}`);
+    ids.add(id);
+    if (typeof name !== "string" || name.length === 0) {
+      throw new TypeError(`table ${tableId} column ${id} name must be a non-empty string`);
+    }
+    if (alignment != null && !["left", "center", "right"].includes(alignment)) {
+      throw new TypeError(`table ${tableId} column ${id} alignment must be left, center, or right`);
+    }
+    return { id, name, alignment: alignment || null };
+  });
+}
+
+function initEvalLiveApp(container, data, name, graphScript, evalLivePy, extraModules, precomputedSections) {
   if (typeof container === "string") container = document.getElementById(container);
   container.classList.add("eval-live");
   container.innerHTML = "";
@@ -95,6 +284,54 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   computedContainer.className = "computed-container";
   container.appendChild(computedContainer);
 
+  // Precomputed report blocks are presentation-ready data. Table ids, rather
+  // than their potentially duplicated display names, own UI state; messages
+  // remain inert and retain their exact position among tables.
+  const precomputedViews = [];
+  if (precomputedSections.length > 0) {
+    const precomputedContainer = document.createElement("div");
+    precomputedContainer.className = "precomputed-container";
+    for (const reportSection of precomputedSections) {
+      const section = document.createElement("section");
+      section.className = "precomputed-report-section";
+      section.dataset.sectionId = reportSection.id;
+      if (reportSection.title) {
+        const heading = document.createElement("h2");
+        heading.className = "report-section-heading";
+        heading.textContent = reportSection.title;
+        section.appendChild(heading);
+      }
+      for (const block of reportSection.blocks) {
+        if (block.kind === "message") {
+          const message = document.createElement("aside");
+          message.className = `report-message tone-${block.tone} layout-${block.layout}`;
+          if (block.title) {
+            const title = document.createElement("strong");
+            title.className = "report-message-title";
+            title.textContent = block.title + " — ";
+            message.appendChild(title);
+          }
+          const text = document.createElement("span");
+          text.textContent = block.text;
+          message.appendChild(text);
+          section.appendChild(message);
+          continue;
+        }
+        // Precomputed report columns commonly mix units (for example a ratio,
+        // percent change, and file count). Do not imply that their smallest raw
+        // number is inherently best; users can opt into highlighting per table.
+        ensureTableUi(state, block.id, "precomputed").highlight = "none";
+        const view = buildTableView(
+          block.name, block.rows, "precomputed", true, block.caption,
+          handlers, block.rows, block.id, block.columns);
+        precomputedViews.push(view);
+        section.appendChild(view.section);
+      }
+      precomputedContainer.appendChild(section);
+    }
+    container.appendChild(precomputedContainer);
+  }
+
   let rawHeader = null;
   const rawContainer = document.createElement("div");
   rawContainer.className = "raw-container";
@@ -104,7 +341,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
   for (const [tableName, rows] of Object.entries(data)) {
     if (!Array.isArray(rows) || rows.length === 0) continue;
     const view = buildTableView(tableName, rows, "raw", true,
-                                TABLE_DESCRIPTIONS[tableName], handlers);
+                                ownValue(TABLE_DESCRIPTIONS, tableName), handlers);
     rawViews.push(view);
   }
   if (rawViews.length > 0) {
@@ -185,6 +422,7 @@ function initEvalLive(container, data, name, graphScript, evalLivePy, extraModul
       rebuildComputedViews();
     }
     for (const v of computedViews) v.sync(state);
+    for (const v of precomputedViews) v.sync(state);
     for (const v of rawViews) v.sync(state);
   }
 
