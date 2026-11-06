@@ -93,7 +93,22 @@ emit `eval_live.warn(...)` or `eval_live.error(...)`. These messages are compute
 rendering outputs, never stored in the database. The CLI shows each unique
 message as it occurs, then summarizes all warnings followed by all errors.
 The webpage shows derived warning/error tables that update with filtering.
-Reporting errors fail the CLI after other outputs render; warnings do not.
+Reporting errors fail the CLI after other outputs are evaluated; warnings do not.
+Generated files are published only after successful rendering. A failed or
+interrupted invocation removes generated outputs while preserving saved data.
+
+Only measurement data is cached. Figures, tables, macros, and the webpage are
+regenerated on each run. Browser filter changes recompute the report and publish
+its tables and graphs together. Each output directory holds one report; use
+separate directories to retain different subsets or comparisons. The HTML embeds
+all runs referenced by those outputs, including cached runs and other commits,
+with their configurations and diagnostics. Unrelated history stays in `results.json`.
+
+Reliable statistics still depend on the evaluation script: declare all
+measurement inputs, count timeouts and failures, join comparisons by treatment
+keys, and keep rendering callbacks deterministic. The [Python guide's advice on
+misleading results](docs/python-guide.rst#avoid-misleading-results) explains these
+risks, measurement units, and the browser's integer limits.
 
 The [Python documentation](docs/index.rst) includes a tutorial, data and filter
 contracts, and API reference generated from docstrings. Build it locally with:
@@ -135,7 +150,7 @@ eval_live.pyodide_lib()  # eval_live.py source for Pyodide runtime
 The JS library exposes a single entry point:
 
 ```js
-initEvalLive(container, data, name, graphScript, evalLivePy)
+initEvalLive(container, data, name, graphScript, evalLivePy, extraModules)
 ```
 
 - **container**: DOM element or element ID
@@ -143,6 +158,7 @@ initEvalLive(container, data, name, graphScript, evalLivePy)
 - **name**: project name shown in the heading
 - **graphScript** (optional): Python script that builds an `eval_live.Registry`
 - **evalLivePy** (optional): source of the `eval_live.py` library (from `eval_live.pyodide_lib()`)
+- **extraModules** (optional): `{filename: source}` mapping for additional Python modules
 
 ## Graphs and computed tables
 
@@ -226,34 +242,61 @@ Open `eval_live/index.html` in a browser to load a JSON file via file picker.
 
 ## Architecture
 
-The viewer is a small state-driven app (no framework). There is one `state`
-object (`state.js`); events run reducers via `setState`, which re-renders:
+The viewer keeps saved rows in `state.data`, controls in `state.ui`, and the
+current report in `state.engine`. Saved rows stay unchanged for the lifetime of
+the page. Raw tables, computed tables, and diagnostics have independent controls,
+even when their display names match.
 
-```
-event -> setState(reducer) -> render(state)  [+ engine.tick(state)]
-```
+Filter edits use `updateFilters(mutator)` to update the controls and request a
+calculation. `setState(mutator)` redraws the page for presentation changes and
+engine results. Collapsing a table, changing highlighting, and switching graph
+tabs do not recalculate the outputs.
+
+SQL, column text, and typed checkbox selections are independent constraints:
+rows must pass all three. Editing SQL leaves checkbox selections intact, and
+checkboxes do not rewrite SQL. Clear all filters resets all three.
 
 - **state.js** — the single state object plus *pure* derivations (row filtering,
-  `rawFilteredData`, clause helpers) and reducers. No DOM, no async; unit-tested
+  `rawFilteredData`) and reducers. No DOM, no async; unit-tested
   directly in node.
-- **table-view.js** — `buildTableView` builds a table's DOM once, then
-  `sync(state)` reconciles it (collapsed class, input values, checkbox state, row
-  visibility). It stores no UI state, so collapse/filters survive re-renders.
-- **graph-engine.js** — `createEngine`: the expensive Pyodide work as *memoized
-  async effects* forming an acyclic DAG, writing results back through `setState`:
-
-  ```
-  rawFilteredData ─▶ computedUnfiltered ─▶ narrowing ─▶ effectiveRawData ─▶ { computed tables (displayed), graphs, raw display }
-                       (checkbox options +        (acyclic: narrowing's
-                        narrowing selection)       inputs never depend on it)
-  ```
-
-  A filter on any table — raw or computed — narrows everything: raw rows, graphs,
-  and all computed tables. The narrowing *selection* and the checkbox *options*
-  are taken from the unfiltered tables (`computedUnfiltered`), so options don't
-  vanish as the displayed rows shrink, and there is no recompute cycle.
+- **table-view.js** — `buildTableView` creates persistent controls. `update`
+  supplies result rows and checkbox options; `sync(state)` updates the controls
+  and replaces the visible rows. Focus, filters, and collapse choices survive
+  result changes; row expansion is local display state.
+- **graph-engine.js** — `createEngine` evaluates Python callbacks from a snapshot
+  of the filters and publishes the complete report. It owns no DOM.
 - **eval-live.js** — `initEvalLive`: owns the state, wires reducers, and
   `render(state)` reconciles the whole page (graph bar, raw + computed tables).
+
+Within one calculation, filters flow in this order:
+
+```mermaid
+flowchart TD
+    saved[Saved rows] --> raw[Raw table filters]
+    raw --> tables[Computed tables before narrowing]
+    tables --> selected[Selected output rows]
+    tables --> options[Checkbox options]
+    selected --> callbacks[interactive_filter callbacks]
+    raw --> callbacks
+    callbacks --> effective[Allowed rows intersected with raw-filtered rows]
+    raw --> effective
+    effective --> outputs[Displayed tables, graphs and diagnostics]
+    effective --> visible[Visible raw rows]
+```
+
+Selections and checkbox options come from tables before narrowing. Using the
+displayed tables to select inputs would make a filter depend on its own results
+and could make choices disappear. Each output's static `requires` selection
+still limits its rendering data. A computed table without `interactive_filter`
+only filters its own displayed rows.
+
+Calculations run one at a time because they share a Python runtime. Each captures
+the filters before awaiting Python; it never reads later edits during that pass.
+If the filters change, the current calculation finishes and its results or errors
+are discarded. The newest queued selection is then evaluated. Tables, graphs,
+and diagnostics appear together only for the current selection, and computed
+values are hidden while that calculation is pending or has failed. Callbacks run
+again on every input change; the Python runtime remains loaded.
 
 ## Tests
 
@@ -261,7 +304,7 @@ Pure-JS unit + DOM-smoke tests, no npm/jsdom (they run the browser modules in a
 `node:vm` context with a tiny DOM shim):
 
 ```bash
-node test/state.test.mjs   # state core: filtering, reducers, SQL-clause helpers
+node test/state.test.mjs   # state core: filtering, reducers, typed selections
 node test/dom.test.mjs      # initEvalLive end-to-end: filter / collapse / checkbox / clear
 node test/graph-engine.test.mjs  # Pyodide conversion boundary: graphs / tables / narrowing
 python test/test_registry.py

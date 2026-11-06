@@ -1,6 +1,9 @@
-*,
-*::before,
-*::after {
+.eval-live,
+.eval-live *,
+.eval-live::before,
+.eval-live::after,
+.eval-live *::before,
+.eval-live *::after {
   box-sizing: border-box;
 }
 
@@ -112,8 +115,6 @@
   font-size: 0.8rem;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  position: sticky;
-  top: 0;
   border-bottom: 2px solid #ddd;
 }
 

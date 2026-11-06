@@ -27,11 +27,11 @@ def css() -> str:
 # concatenates them into a single inline <script>; index.html loads the same
 # files as separate <script src> tags -- keep the two lists in sync.
 _JS_MODULES = (
-    "sql-filter.js",     # looksLikeSql / sqlMatchSet (AlaSQL) + clauseForColumn
-    "state.js",          # single state object: pure derivations, reducers, clause helpers
+    "sql-filter.js",     # looksLikeSql / sqlMatchSet (AlaSQL)
+    "state.js",          # single state object: pure derivations and reducers
     "table-view.js",     # buildTableView: persistent per-table DOM + sync(state)
-    "graph-engine.js",   # createEngine: memoized async Pyodide effects (graphs/tables/narrowing)
-    "eval-live.js",      # initEvalLive: owns state, setState -> render(state)
+    "graph-engine.js",   # createEngine: complete report calculation in Pyodide
+    "eval-live.js",      # initEvalLive: owns state, requests calculations, redraws
 )
 
 

@@ -1,289 +1,182 @@
-/* Part of eval-live -- the DOM layer for one table. A "table view" builds its
-   persistent DOM ONCE (heading, filter toolbar, checkbox dropdowns, rows) and
-   then sync(state) reconciles that DOM to the current state: collapsed class,
-   input values, checkbox checked-state, row visibility, row count. It stores NO
-   UI state of its own -- it reads everything from state.ui (so collapse/filters
-   survive re-renders) and writes back through the `handlers` callbacks, which
-   initEvalLive wires to setState(reducer).
-
-   sync() is idempotent: calling it repeatedly with the same state is a no-op, so
-   the owner can re-sync the whole page on every change cheaply (rows are toggled,
-   never rebuilt). Loaded as a plain <script>; depends on state.js + sql-filter.js.
-
-   Row expand/collapse (+/-) is deliberately kept as transient DOM state on each
-   row rather than in the central state: it is per-row and ephemeral, and raw
-   rows are never rebuilt, so it persists naturally without bloating state. */
+/* One table's controls and results. Controls keep their DOM identity while
+   sync(state) replaces the result rows. User choices live in state.ui; expanded
+   rows are local display state. Loaded after state.js. */
 
 /**
- * @param {string} name        table name (key into state.ui.tables)
- * @param {Array}  rows         the table's rows (fixed for the life of the view)
- * @param {string} kind         "raw" | "computed"
- * @param {boolean} filterable  show the filter toolbar + per-column inputs
- * @param {string} [description] clarifying subtitle
- * @param {Object} handlers     { onToggleCollapse(name), onSql(name,val),
- *                                onColFilter(name,col,val), onHighlight(name,mode),
- *                                onCheckbox(name,col,checkedValues,allValues) }
- * @param {Array} [optionRows]   rows the checkbox dropdowns enumerate (the
- *                               UNFILTERED rows, so options don't vanish as the
- *                               displayed `rows` narrow). Defaults to `rows`.
- * @returns {{name, kind, rows, section, sync(state)}}
+ * Create a table view and its persistent controls.
+ *
+ * update(rows, optionRows) supplies a calculation's results and the rows from
+ * before computed narrowing. sync(state) redraws using current controls.
+ * Pending/failed computed results are hidden; raw rows also wait when a
+ * computed filter may narrow them. Active filters remain editable with no rows.
+ *
+ * handlers: onToggleCollapse(name, kind), onSql(name, value, kind),
+ * onColFilter(name, column, value, kind), onHighlight(name, mode, kind),
+ * onCheckbox(name, column, checkedValues, allValues, kind).
  */
-function buildTableView(name, rows, kind, filterable, description, handlers, optionRows) {
-  optionRows = optionRows || rows;
-  // Columns from the unfiltered optionRows, not the narrowed `rows`, so a column
-  // doesn't vanish when filtering leaves only rows that omit its key.
-  const cols = columnsOf(optionRows);
-
-  const section = document.createElement("div");
-  section.className = "table-section";
-
-  // --- heading (click to minimize) ---------------------------------------
-  const heading = document.createElement("h2");
-  heading.className = "table-heading";
-  const caret = document.createElement("span");
-  caret.className = "collapse-caret";
-  caret.textContent = "▾";          // CSS rotates it when .collapsed
-  heading.appendChild(caret);
-  const titleText = document.createElement("span");
-  titleText.className = "table-title";
-  titleText.textContent = name;
-  heading.appendChild(titleText);
-  const rowCount = document.createElement("span");
-  rowCount.className = "row-count";
-  heading.appendChild(rowCount);
-  heading.addEventListener("click", () => handlers.onToggleCollapse(name));
-  section.appendChild(heading);
-
-  if (description) {
-    const desc = document.createElement("p");
-    desc.className = "table-description";
-    desc.textContent = description;
-    section.appendChild(desc);
+function buildTableView(name, rows, kind, filterable, description, handlers, optionRows = rows) {
+  function element(tag, className, parent, text) {
+    const node = document.createElement(tag);
+    if (className) node.className = className;
+    if (text !== undefined) node.textContent = text;
+    if (parent) parent.appendChild(node);
+    return node;
   }
 
-  // --- per-table controls: which numeric cell to highlight per row -------
-  const controls = document.createElement("div");
-  controls.className = "table-controls";
-  const hlLabel = document.createElement("label");
-  hlLabel.className = "highlight-control";
-  hlLabel.textContent = "Highlight # per row: ";
-  const hlSelect = document.createElement("select");
-  for (const [val, text] of [["lowest", "lowest"], ["highest", "highest"], ["none", "none"]]) {
-    const opt = document.createElement("option");
-    opt.value = val;
-    opt.textContent = text;
-    hlSelect.appendChild(opt);
+  // Leave controls in place when their order is unchanged, preserving focus.
+  function place(parent, node, index) {
+    if (parent.children[index] !== node) parent.insertBefore(node, parent.children[index] || null);
   }
-  hlSelect.addEventListener("change", () => handlers.onHighlight(name, hlSelect.value));
-  hlLabel.appendChild(hlSelect);
-  controls.appendChild(hlLabel);
-  section.appendChild(controls);
 
-  // --- filter toolbar: SQL box + per-column checkbox dropdowns ------------
-  let sqlInput = null;
-  const checkboxGroups = [];    // { col, values, boxes:[{value, cb}] }
+  const section = element("div", "table-section");
+  const heading = element("h2", "table-heading", section);
+  element("span", "collapse-caret", heading, "▾");
+  element("span", "table-title", heading, name);
+  const rowCount = element("span", "row-count", heading);
+  heading.addEventListener("click", () => handlers.onToggleCollapse(name, kind));
+  if (description) element("p", "table-description", section, description);
+
+  const controls = element("div", "table-controls", section);
+  const hlLabel = element("label", "highlight-control", controls, "Highlight # per row: ");
+  const hlSelect = element("select", null, hlLabel);
+  for (const mode of ["lowest", "highest", "none"]) {
+    element("option", null, hlSelect, mode).value = mode;
+  }
+  hlSelect.addEventListener("change", () => handlers.onHighlight(name, hlSelect.value, kind));
+
+  let sqlInput, dropdowns;
   if (filterable) {
-    const toolbar = document.createElement("div");
-    toolbar.className = "filter-toolbar";
-
-    const sqlWrap = document.createElement("div");
-    sqlWrap.className = "sql-filter-wrap";
-    sqlInput = document.createElement("input");
+    const toolbar = element("div", "filter-toolbar", section);
+    const sqlWrap = element("div", "sql-filter-wrap", toolbar);
+    sqlInput = element("input", "sql-filter-input", sqlWrap);
     sqlInput.type = "text";
-    sqlInput.className = "sql-filter-input";
-    sqlInput.placeholder =
-      "SQL filter, e.g.  backend IN ('feldera','flowlog') AND mode = 'proofs'   (plain text = substring match)";
-    sqlInput.addEventListener("input", () => handlers.onSql(name, sqlInput.value));
-    sqlWrap.appendChild(sqlInput);
-    const hint = document.createElement("span");
-    hint.className = "sql-filter-hint";
-    hint.textContent =
-      "SQL WHERE clause:  = != <>  LIKE '%x%'  IN (...)  BETWEEN  AND/OR/NOT  ( )";
-    hint.title =
-      "Type a SQL WHERE condition over the columns (evaluated by AlaSQL). " +
-      "Plain text with no SQL operator falls back to a substring match across " +
-      "all columns. SQL string comparisons are case-sensitive; use LIKE for " +
-      "case-insensitive matching.";
-    sqlWrap.appendChild(hint);
-    toolbar.appendChild(sqlWrap);
+    sqlInput.placeholder = "SQL filter, e.g. size >= 100 AND status = 'success' (or plain text)";
+    sqlInput.addEventListener("input", () => handlers.onSql(name, sqlInput.value, kind));
+    element("span", "sql-filter-hint", sqlWrap,
+      "SQL or text, column text, and checkbox filters apply together. Clear all filters resets them.");
+    dropdowns = element("div", "checkbox-dropdowns", toolbar);
+  }
 
-    // Checkbox dropdowns for scalar columns with < 30 distinct values. Options
-    // come from optionRows (the unfiltered rows) so they stay stable as the
-    // displayed rows narrow.
-    const dropdowns = document.createElement("div");
-    dropdowns.className = "checkbox-dropdowns";
-    for (const col of cols) {
-      const values = distinctScalarValues(optionRows, col);
-      if (values === null) continue;         // non-scalar column; no dropdown
-      if (values.length >= 30) continue;     // too many to checkbox; use typed SQL
+  const wrap = element("div", "table-wrap", section);
+  const table = element("table", null, wrap);
+  const thead = element("thead", null, table);
+  const header = element("tr", null, thead);
+  element("th", "expand-col", header);
+  const filterRow = filterable ? element("tr", "filter-row", thead) : null;
+  if (filterRow) element("th", "expand-col", filterRow);
+  const tbody = element("tbody", null, table);
+  const columns = new Map();
+  const expanded = new Set();
+  let cols = columnsOf([...rows, ...optionRows]);
 
-      const details = document.createElement("details");
-      details.className = "checkbox-dropdown";
-      const summary = document.createElement("summary");
-      summary.textContent = `${col} (${values.length})`;
-      details.appendChild(summary);
+  function update(newRows, newOptions = newRows) {
+    rows = newRows;
+    optionRows = newOptions;
+    // Keep controls available when a calculation returns no rows.
+    const names = columnsOf([...rows, ...optionRows]);
+    if (names.length) cols = names;
+  }
 
-      const list = document.createElement("div");
-      list.className = "checkbox-list";
-      const boxes = [];
-      for (const value of values) {
-        const label = document.createElement("label");
-        label.className = "checkbox-item";
-        const cb = document.createElement("input");
-        cb.type = "checkbox";
-        cb.checked = true;
-        const span = document.createElement("span");
-        span.textContent = value === "" ? "(empty)" : value;
-        label.appendChild(cb);
-        label.appendChild(span);
-        list.appendChild(label);
-        const box = { value, cb };
-        boxes.push(box);
-        cb.addEventListener("change", () => {
-          const checked = boxes.filter((b) => b.cb.checked).map((b) => b.value);
-          handlers.onCheckbox(name, col, checked, values);
-        });
+  function syncColumns(ui) {
+    const names = [...new Set([...cols, ...Object.keys(ui.colFilters), ...Object.keys(ui.checkedValues)])];
+    for (const [col, control] of columns) {
+      if (names.includes(col)) continue;
+      control.th.remove();
+      if (control.filter) control.filter.remove();
+      if (control.details) control.details.remove();
+      columns.delete(col);
+    }
+    names.forEach((col, index) => {
+      let control = columns.get(col);
+      if (!control) {
+        control = {th: element("th", null, null, col), boxes: new Map()};
+        if (filterable) {
+          control.filter = element("th");
+          control.input = element("input", "filter-input", control.filter);
+          control.input.placeholder = "filter...";
+          control.input.addEventListener("input", () => handlers.onColFilter(name, col, control.input.value, kind));
+          control.details = element("details", "checkbox-dropdown");
+          control.summary = element("summary", null, control.details);
+          control.list = element("div", "checkbox-list", control.details);
+        }
+        columns.set(col, control);
       }
-      details.appendChild(list);
-      dropdowns.appendChild(details);
-      checkboxGroups.push({ col, values, boxes });
-    }
-    if (checkboxGroups.length > 0) toolbar.appendChild(dropdowns);
-
-    section.appendChild(toolbar);
-  }
-
-  // --- table: header, per-column filter inputs, body ----------------------
-  const table = document.createElement("table");
-  const thead = document.createElement("thead");
-  const headerRow = document.createElement("tr");
-  const thExpand = document.createElement("th");
-  thExpand.className = "expand-col";
-  headerRow.appendChild(thExpand);
-  for (const col of cols) {
-    const th = document.createElement("th");
-    th.textContent = col;
-    headerRow.appendChild(th);
-  }
-  thead.appendChild(headerRow);
-
-  const colInputs = {};         // col -> <input>
-  if (filterable) {
-    const filterRow = document.createElement("tr");
-    filterRow.className = "filter-row";
-    const filterExpandTh = document.createElement("th");
-    filterExpandTh.className = "expand-col";
-    filterRow.appendChild(filterExpandTh);
-    for (const col of cols) {
-      const th = document.createElement("th");
-      const input = document.createElement("input");
-      input.type = "text";
-      input.className = "filter-input";
-      input.placeholder = "filter...";
-      input.addEventListener("input", () => handlers.onColFilter(name, col, input.value));
-      colInputs[col] = input;
-      th.appendChild(input);
-      filterRow.appendChild(th);
-    }
-    thead.appendChild(filterRow);
-  }
-  table.appendChild(thead);
-
-  const tbody = document.createElement("tbody");
-  const rowEls = [];
-  for (const row of rows) {
-    const tr = document.createElement("tr");
-    tr.classList.add("collapsed");
-    const tdBtn = document.createElement("td");
-    tdBtn.className = "expand-col";
-    const btn = document.createElement("button");
-    btn.className = "expand-btn";
-    btn.textContent = "+";
-    btn.addEventListener("click", () => {
-      const collapsed = tr.classList.toggle("collapsed");
-      btn.textContent = collapsed ? "+" : "−";
+      place(header, control.th, index + 1);
+      if (!filterable) return;
+      place(filterRow, control.filter, index + 1);
+      if (document.activeElement !== control.input) {
+        control.input.value = Object.hasOwn(ui.colFilters, col) ? ui.colFilters[col] : "";
+      }
+      const available = distinctScalarValues(optionRows, col);
+      const selected = Object.hasOwn(ui.checkedValues, col) ? ui.checkedValues[col] : null;
+      if ((!available || available.length >= 30) && !selected) {
+        control.details.remove();
+        return;
+      }
+      // Keep selected values visible even if another filter removes their rows.
+      control.values = [...new Set([...(available || []), ...(selected || [])])];
+      control.summary.textContent = `${col} (${control.values.length})`;
+      for (const [value, box] of control.boxes) {
+        if (!control.values.includes(value)) { box.label.remove(); control.boxes.delete(value); }
+      }
+      control.values.forEach((value, position) => {
+        let box = control.boxes.get(value);
+        if (!box) {
+          const label = element("label", "checkbox-item");
+          const cb = element("input", null, label);
+          cb.type = "checkbox";
+          element("span", null, label, value === null ? "(null / missing)" : value === "" ? "(empty string)"
+            : typeof value === "string" ? JSON.stringify(value) : String(value));
+          box = {label, cb};
+          control.boxes.set(value, box);
+          cb.addEventListener("change", () => handlers.onCheckbox(name, col,
+            control.values.filter(v => control.boxes.get(v).cb.checked), control.values, kind));
+        }
+        box.cb.checked = !selected || selected.includes(value);
+        place(control.list, box.label, position);
+      });
+      // Other columns may have no dropdown, so position among existing controls.
+      const previous = names.slice(0, index).filter(c => columns.get(c).details?.parentNode === dropdowns).length;
+      place(dropdowns, control.details, previous);
     });
-    tdBtn.appendChild(btn);
-    tr.appendChild(tdBtn);
-    const tds = {};
-    for (const col of cols) {
-      const td = document.createElement("td");
-      const val = row[col];
-      td.textContent = cellText(val);
-      // Styled cell ({text, style}) -> inline visual style (color/bold/dim).
-      if (val !== null && typeof val === "object" && val.style) {
-        applyCellStyle(td, val.style);
-      }
-      tds[col] = td;
-      tr.appendChild(td);
-    }
-    tbody.appendChild(tr);
-    rowEls.push({ tr, tds });
-  }
-  table.appendChild(tbody);
-
-  const wrap = document.createElement("div");
-  wrap.className = "table-wrap";
-  wrap.appendChild(table);
-  section.appendChild(wrap);
-
-  // --- sync: reconcile DOM -> state (idempotent) -------------------------
-  function setInputValue(input, value) {
-    // Skip while the user is typing in this field (don't fight the caret); the
-    // keystroke already pushed its value into state, so they are in sync.
-    if (document.activeElement === input) return;
-    if (input.value !== value) input.value = value;
+    return names;
   }
 
   function sync(state) {
-    const ui = state.ui.tables[name] || makeTableUi(kind);
-
+    const ui = state.ui.tables[tableKey(name, kind)] || makeTableUi(kind);
     section.classList.toggle("collapsed", !!ui.collapsed);
+    hlSelect.value = ui.highlight;
+    if (filterable && document.activeElement !== sqlInput) sqlInput.value = ui.sql;
+    const names = syncColumns(ui);
+    const hasComputedFilter = Object.values(state.ui.tables).some(control => control.kind === "computed" && hasFilters(control));
+    const pending = (kind !== "raw" || hasComputedFilter) && state.graphScript && state.engine.status !== "ready";
+    const allowedRows = kind === "raw" && state.engine.narrowing?.[name];
+    const allowed = allowedRows ? narrowedKeySet(allowedRows) : null;
+    const visible = pending ? [] : visibleRowIndices(rows, names, ui)
+      .filter(i => !allowed || allowed.has(rowKey(rows[i])));
 
-    if (filterable) {
-      setInputValue(sqlInput, ui.sql || "");
-      for (const col of cols) {
-        if (colInputs[col]) setInputValue(colInputs[col], ui.colFilters[col] || "");
+    tbody.innerHTML = "";
+    for (const i of visible) {
+      const row = rows[i], key = rowKey(row);
+      const tr = element("tr", expanded.has(key) ? "" : "collapsed", tbody);
+      const btn = element("button", "expand-btn", element("td", "expand-col", tr), expanded.has(key) ? "−" : "+");
+      btn.addEventListener("click", () => {
+        const collapsed = tr.classList.toggle("collapsed");
+        if (collapsed) expanded.delete(key); else expanded.add(key);
+        btn.textContent = collapsed ? "+" : "−";
+      });
+      const best = bestNumericCols(row, names, ui.highlight);
+      for (const col of names) {
+        const value = row[col];
+        const td = element("td", best.has(col) ? "cell-best" : null, tr, cellText(value));
+        if (value !== null && typeof value === "object" && value.style) applyCellStyle(td, value.style);
       }
-      // Checkboxes are a view of ui.sql: check the values the SQL constrains to
-      // (no recognizable clause for a column => all checked = "no constraint").
-      for (const group of checkboxGroups) {
-        const wanted = extractColumnValues(ui.sql || "", group.col);
-        if (wanted === null) {
-          for (const b of group.boxes) b.cb.checked = true;
-        } else {
-          const set = new Set(wanted.map((v) => v.toLowerCase()));
-          for (const b of group.boxes) b.cb.checked = set.has(String(b.value).toLowerCase());
-        }
-      }
     }
-
-    // Row visibility: this table's own filter, then (raw tables only) the
-    // computed->raw narrowing feedback.
-    const idxs = visibleRowIndices(rows, cols, ui);
-    let allowed = null;
-    if (kind === "raw" && state.engine.narrowing && state.engine.narrowing[name]) {
-      allowed = new Set(state.engine.narrowing[name].map((r) => JSON.stringify(r)));
-    }
-    const shown = new Array(rows.length).fill(false);
-    for (const i of idxs) {
-      if (allowed && !allowed.has(JSON.stringify(rows[i]))) continue;
-      shown[i] = true;
-    }
-    const mode = ui.highlight || "lowest";
-    hlSelect.value = mode;
-    let visible = 0;
-    for (let i = 0; i < rowEls.length; i++) {
-      const { tr, tds } = rowEls[i];
-      tr.style.display = shown[i] ? "" : "none";
-      if (shown[i]) visible++;
-      const best = bestNumericCols(rows[i], cols, mode);
-      for (const col of cols) tds[col].classList.toggle("cell-best", best.has(col));
-    }
-    rowCount.textContent = visible === rows.length
-      ? `(${rows.length} rows)`
-      : `(${visible}/${rows.length} rows)`;
+    rowCount.textContent = pending ? (state.engine.status === "error" ? "(unavailable)" : "(updating)")
+      : visible.length === rows.length ? `(${rows.length} rows)` : `(${visible.length}/${rows.length} rows)`;
   }
 
-  return { name, kind, rows, section, sync };
+  // Construct headings and rows for callers that use this view directly.
+  sync({ui: {tables: {}}, engine: {}, graphScript: null});
+  return {name, kind, section, update, sync};
 }

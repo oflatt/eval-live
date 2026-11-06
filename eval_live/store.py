@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import tempfile
+from types import MappingProxyType
 from typing import Any, Iterator, Mapping
 
 Scalar = str | int | float | bool | None
@@ -41,6 +42,23 @@ def parameters(values: Mapping[str, Any]) -> dict:
         result[name] = ([scalar(item) for item in value]
                         if isinstance(value, (list, tuple)) else scalar(value))
     return result
+
+
+def readonly_parameters(values: Mapping[str, Any]) -> Mapping:
+    """Normalize parameters into a read-only mapping with immutable sequences."""
+    return MappingProxyType({key: tuple(value) if isinstance(value, list) else value
+                             for key, value in parameters(values).items()})
+
+
+def run_identity(*, repository, commit, dirty, benchmark, runner_id, config_id, inputs, environment_id) -> dict:
+    """Describe measurement identity for both planning and saved-run validation.
+
+    Timeout is separate: eligibility depends on the outcome and requested
+    deadline. Field names here are part of the persistent cache format.
+    """
+    return {"repository": repository, "commit": commit, "dirty": dirty,
+            "benchmark": benchmark, "runner": runner_id, "config": config_id,
+            "inputs": inputs, "environment": environment_id}
 
 
 def digest(value: Any) -> str:
@@ -211,16 +229,17 @@ class Store:
             groups = {}
             for row in self.data[table]:
                 groups.setdefault((row[key], row.get("scope", "")), []).append(row)
-            for rows in groups.values():
-                read_parameters(rows)
+            decoded = {group: read_parameters(rows) for group, rows in groups.items()}
             if table == "eval_configs":
-                for config_id in configs:
-                    scopes = {scope: read_parameters(rows) for (identity, scope), rows in groups.items() if identity == config_id}
+                by_config = {}
+                for (config_id, scope), values in decoded.items():
+                    by_config.setdefault(config_id, {})[scope] = values
+                for config_id, scopes in by_config.items():
                     if set(scopes) != {"request", "arguments", "build"} or digest(scopes) != config_id:
                         raise ValueError("configuration identity does not match its parameters")
             elif table == "eval_environments":
-                for (environment_id, _scope), rows in groups.items():
-                    if digest(read_parameters(rows)) != environment_id:
+                for (environment_id, _scope), values in decoded.items():
+                    if digest(values) != environment_id:
                         raise ValueError("environment identity does not match its parameters")
             elif {identity for identity, _scope in groups} != invocations:
                 raise ValueError("invocation has no saved arguments")
@@ -261,10 +280,9 @@ class Store:
             if row["status"] == "success" and (type(row["seconds"]) not in (int, float) or row["seconds"] < 0):
                 raise ValueError("successful run must have a duration")
             inputs = inputs_by_run.get(row["run_id"], [])
-            identity = {"repository": row["repository"], "commit": row["commit"],
-                        "dirty": row["dirty"], "benchmark": row["benchmark"],
-                        "runner": row["runner_id"], "config": row["config_id"], "inputs": inputs,
-                        "environment": row["environment_id"]}
+            identity = run_identity(repository=row["repository"], commit=row["commit"], dirty=row["dirty"],
+                                    benchmark=row["benchmark"], runner_id=row["runner_id"],
+                                    config_id=row["config_id"], inputs=inputs, environment_id=row["environment_id"])
             expected = digest(identity)
             # Early schema-1 files included the deadline in the stored key.
             # Index them by the new identity without rewriting observations.
@@ -277,6 +295,7 @@ class Store:
             not isinstance(value, str) or not value for key in requirements for value in key
         ):
             raise ValueError("invalid or duplicate output requirement")
+        requirements = set(requirements)
         for row in self.data["eval_selections"]:
             if tuple(row[key] for key in requirement_keys) not in requirements:
                 raise ValueError("selection has no output requirement")

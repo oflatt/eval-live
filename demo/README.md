@@ -89,9 +89,11 @@ The flag and worker count participate in cache identity. Concurrent timing
 measurements share machine resources, so use `--jobs 1` for sequential timings.
 
 Timings are illustrative and vary with machine load. Container construction is
-outside the timed region. Generated files are replaced individually; use a
-separate output directory for subsets to avoid confusing them with older
-paper files. The sibling `.lock` file is writer coordination, not stored data.
+outside the timed region. Each invocation replaces the generated report;
+files for unselected outputs are removed. Use separate output directories to
+keep several reports. The HTML includes the runs referenced by its outputs;
+`results.json` retains the complete history. The sibling `.lock` file is writer
+coordination, not stored data.
 
 The [Python guide](../docs/python-guide.rst) covers callback contracts and the
 [API reference](../docs/api.rst) is generated from docstrings. A second example,

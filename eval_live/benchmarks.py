@@ -10,10 +10,9 @@ from pathlib import Path
 import signal
 import subprocess
 import time
-from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
-from .store import Data, digest, parameters, validate_tables
+from .store import Data, digest, parameters, readonly_parameters, validate_tables
 
 
 @dataclass
@@ -143,17 +142,12 @@ class Benchmark:
         if self.timeout is not None and (type(self.timeout) not in (int, float)
                 or not math.isfinite(self.timeout) or self.timeout <= 0):
             raise ValueError("timeout must be None or a finite positive number")
-        parameters(self.build_config)
         if not callable(self.error_rows):
             raise ValueError("error_rows must be a function returning named flat tables")
-        parameters(self.tools)
         if any(not isinstance(k, str) or not isinstance(v, str) for k, v in self.environment.items()):
             raise ValueError("environment keys and values must be strings")
         for name in ("build_config", "tools", "environment"):
-            values = parameters(getattr(self, name))
-            object.__setattr__(self, name, MappingProxyType({
-                key: tuple(value) if isinstance(value, list) else value for key, value in values.items()
-            }))
+            object.__setattr__(self, name, readonly_parameters(getattr(self, name)))
         object.__setattr__(self, "inputs", tuple(self.inputs))
         object.__setattr__(self, "dependencies", tuple(self.dependencies))
 
@@ -167,7 +161,7 @@ class Benchmark:
 
     def fallback(self, config: Mapping, status: str) -> Data:
         """Construct explicit rows for an unfinished or unsuccessful treatment."""
-        tables = self.error_rows(MappingProxyType(dict(config)), status)
+        tables = self.error_rows(readonly_parameters(config), status)
         validate_tables(tables, user=True)
         if not tables or any(not rows for rows in tables.values()):
             raise ValueError("error_rows must supply at least one row in every declared table")
@@ -187,11 +181,8 @@ class RunContext:
     processes: list[ProcessResult] = field(default_factory=list)
 
     def __post_init__(self):
-        self.config = MappingProxyType({
-            key: tuple(value) if isinstance(value, list) else value
-            for key, value in parameters(self.config).items()
-        })
-        self.environment = MappingProxyType(dict(self.environment))
+        self.config = readonly_parameters(self.config)
+        self.environment = readonly_parameters(self.environment)
 
     def command(self, argv: Sequence[str | Path], *, cwd: str | Path | None = None,
                 check: bool = True) -> ProcessResult:

@@ -1,9 +1,11 @@
-"""eval_live – lightweight library for registering visualizations.
+"""Register a paper's treatments, collectors, figures, tables, and macros.
 
-Create a Registry, add graphs and tables to it, and assign it to the
-module-level ``registry`` variable so eval-live can find it.
+Use ``Registry.run`` to collect required measurements and generate paper
+outputs and an interactive report. ``requires`` selects treatments before
+collection; ``interactive_filter`` narrows saved data in the browser.
 
-Quick start::
+For a standalone viewer with caller-supplied data, assign the rendering
+registry to the module-level ``registry`` variable::
 
     import eval_live
 
@@ -122,6 +124,14 @@ class _Output:
     caption: str | None = None
     interactive_filter: Callable | None = None
 
+    def table_result(self, value):
+        """Describe a table or macro result for the browser and terminal."""
+        rows = ([{"macro": name, "value": item} for name, item in value.items()]
+                if self.kind == "macros" else value)
+        return {"name": self.title, "rows": rows,
+                "has_interactive_filter": self.interactive_filter is not None,
+                "caption": self.caption}
+
 
 def _requirements(requires):
     if requires is None or requires == {}:
@@ -195,12 +205,17 @@ class Registry:
         self.title = title
         self._messages = {}
         self._message_handler = None
+        self._selections = None
 
-    def _invoke(self, owner, function, *args, default=None):
+    def _evaluate(self, output, data, *, capture_errors=True):
+        """Evaluate one output with its saved selection and replace its diagnostics.
+
+        Results are not retained. Callback errors become diagnostics and an empty
+        result unless ``capture_errors=False``, which propagates the exception.
+        KeyboardInterrupt always propagates. Interactive filters use shared data
+        separately from this per-output selection.
+        """
         global _message_sink
-        identity = (id(self._messages), owner)
-        if getattr(_message_sink, "owner", None) == identity:
-            return function(*args)
         messages = {}
 
         def emit(level, message):
@@ -208,15 +223,23 @@ class Registry:
             if self._message_handler:
                 self._message_handler(level, message)
 
-        emit.owner = identity
         previous, _message_sink = _message_sink, emit
         try:
-            return function(*args)
+            if self._selections is not None:
+                data = _scoped_data(data, self._selections[output.id])
+            value = output.render(data)
+            if output.kind == "table" and (not isinstance(value, list) or any(not isinstance(row, dict) for row in value)):
+                raise ValueError("table callbacks must return a list of row dictionaries")
+            if output.kind == "macros" and not isinstance(value, Mapping):
+                raise ValueError("macro callbacks must return a mapping of names to values")
+            return value
         except Exception as exception:
-            emit("error", f"{owner}: {exception}")
-            return default
+            if not capture_errors:
+                raise
+            emit("error", f"{output.title}: {exception}")
+            return {} if output.kind == "macros" else [] if output.kind == "table" else None
         finally:
-            self._messages[owner] = messages
+            self._messages[output.title] = messages
             _message_sink = previous
 
     def run_messages(self):
@@ -295,6 +318,9 @@ class Registry:
     def graph(self, name, fn=None, *, requires=None, id=None):
         """Register ``fn(data) -> matplotlib.figure.Figure``.
 
+        Return ``None`` to omit a figure. File export also removes that figure's
+        previous generated file.
+
         ``name`` is the display title. ``requires(treatments)`` selects the
         treatments needed by this output before collection. Omit it to select
         the whole catalog. Interactive filtering never changes this selection.
@@ -354,45 +380,19 @@ class Registry:
         file. ``--timeout`` overrides command deadlines; raising it preserves
         successful samples and recollects timed-out work. ``--dry-run`` inspects
         the plan; ``--render-only`` replays saved selections without benchmarks.
+
         Every requested treatment has measured or explicit error rows. Ctrl+C
         stops collection and rendering. Figure warnings/errors are computed,
         deduplicated, and never stored; reporting errors fail after rendering.
+
+        Only measurement data is cached. Validation and ``--dry-run`` leave the
+        previous report in place. Once collection or rendering starts, its files
+        are removed; new files are published only after successful rendering.
+        Errors or Ctrl+C preserve saved data. Use separate output directories to
+        retain reports or run concurrent invocations.
         """
         from .planning import _Runner
         return _Runner(self).run(args=args, argv=argv)
-
-    @property
-    def _graphs(self):
-        return [(output.title, output.render) for output in self._outputs if output.kind == "graph"]
-
-    @property
-    def _tables(self):
-        result = []
-        for output in self._outputs:
-            if output.kind == "graph":
-                continue
-            fn = output.render
-            if output.kind == "macros":
-                def fn(data, render=fn):
-                    return [{"macro": name, "value": value} for name, value in render(data).items()]
-            result.append((output.title, fn, output.interactive_filter, output.caption))
-        return result
-
-    def _bind(self, selections):
-        """Use the same registry callbacks with a saved selection per output."""
-        bound = Registry()
-        bound._messages = self._messages
-        bound._message_handler = self._message_handler
-        for output in self._outputs:
-            scope = selections[output.id]
-
-            def render(data, output=output, scope=scope):
-                default = {} if output.kind == "macros" else [] if output.kind == "table" else None
-                return self._invoke(output.title, output.render, _scoped_data(data, scope), default=default)
-
-            bound._add(output.kind, output.title, render, None, output.id, output.caption,
-                       output.interactive_filter)
-        return bound
 
     def run_graphs(self, data):
         """Run all registered graph functions and return rendered results.
@@ -405,28 +405,34 @@ class Registry:
         import matplotlib.pyplot as plt
 
         results = []
-        for name, fn in self._graphs:
-            fig = self._invoke(name, fn, data)
+        for output in self._outputs:
+            if output.kind != "graph":
+                continue
+            fig = self._evaluate(output, data)
             if fig is None:
                 continue
             buf = io.BytesIO()
-            fig.savefig(buf, format="png", dpi=150)
-            plt.close(fig)
+            try:
+                fig.savefig(buf, format="png", dpi=150)
+            finally:
+                plt.close(fig)
             buf.seek(0)
             b64 = base64.b64encode(buf.read()).decode()
-            results.append({"name": name, "src": f"data:image/png;base64,{b64}"})
+            results.append({"name": output.title, "src": f"data:image/png;base64,{b64}"})
         return results
 
     def render_to_dir(self, data, outdir, fmt="pdf", dpi=150):
         """Render supplied data to graph, table, and macro files locally.
 
-        Graphs use ``fmt`` (PDF by default); nonempty tables produce JSON
-        and LaTeX. Macros produce
-        LaTeX. Return the written paths. No benchmarks run: ``requires`` is used
-        by :meth:`run`, which stores data in one JSON file without table sidecars.
+        Graphs use ``fmt`` (PDF by default); nonempty tables produce JSON and
+        LaTeX. Macros produce LaTeX. Return the written paths. No benchmarks run:
+        ``requires`` is used by :meth:`run`, which stores data in one JSON file
+        without table sidecars.
+        Replace the previous generated outputs in this directory. A rendering
+        exception removes those outputs; unrelated files are preserved.
         """
         from .render import render_outputs
-        return [str(path) for path in render_outputs(data, self._outputs, outdir,
+        return [str(path) for path in render_outputs(data, self, outdir,
                                                     fmt=fmt, dpi=dpi, table_json=True)]
 
     def run_tables(self, data):
@@ -436,15 +442,8 @@ class Registry:
         "has_interactive_filter": bool, "caption": str|None}`` dicts.  Called by the
         JS engine.
         """
-        results = []
-        for name, fn, fs, caption in self._tables:
-            results.append({
-                "name": name,
-                "rows": self._invoke(name, fn, data, default=[]),
-                "has_interactive_filter": fs is not None,
-                "caption": caption,
-            })
-        return results
+        return [output.table_result(self._evaluate(output, data))
+                for output in self._outputs if output.kind != "graph"]
 
     def render_to_console(self, data, tables=None, console=None):
         """Render registered tables to a terminal with rich (graphs are skipped).
@@ -455,7 +454,15 @@ class Registry:
         """
         from . import console as console_renderer
 
-        return console_renderer.render(self._tables, data, console, names=tables)
+        outputs = [output for output in self._outputs if output.kind != "graph"]
+        if tables is not None:
+            by_name = {output.title: output for output in outputs}
+            missing = [name for name in tables if name not in by_name]
+            if missing:
+                raise ValueError(f"unknown table(s): {missing}")
+            outputs = [by_name[name] for name in tables]
+        results = (output.table_result(self._evaluate(output, data, capture_errors=False)) for output in outputs)
+        return console_renderer.render(results, console)
 
     def apply_table_filters(self, table_filters, data):
         """Chain interactive_filter functions for all filtered computed tables.
@@ -481,11 +488,8 @@ class Registry:
             function in registration order.
         """
         filtered_data = data
-        for name, _fn, fs, _caption in self._tables:
-            if fs is None:
-                continue
-            for tf in table_filters:
-                if tf["name"] == name:
-                    filtered_data = fs(tf["filtered_rows"], filtered_data)
-                    break
+        selected = {table["name"]: table["filtered_rows"] for table in table_filters}
+        for output in self._outputs:
+            if output.interactive_filter is not None and output.title in selected:
+                filtered_data = output.interactive_filter(selected[output.title], filtered_data)
         return filtered_data

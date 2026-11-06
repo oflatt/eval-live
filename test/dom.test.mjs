@@ -1,12 +1,12 @@
 /* End-to-end smoke test of the DOM layer with a tiny hand-rolled DOM shim (no
    jsdom / npm). It drives the real initEvalLive through the raw-tables path (no
    graph script, so no Pyodide) and asserts the state<->DOM wiring: filtering
-   hides rows, the heading collapses the section, a checkbox rewrites the SQL box
-   and filters rows, and "Clear all filters" resets everything.
+   hides rows, the heading collapses the section, checkboxes filter rows independently of SQL, and "Clear all filters" resets everything.
 
    The shim implements only what these modules touch. Run: `node test/dom.test.mjs`. */
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { createRequire } from "node:module";
 import assert from "node:assert/strict";
 
 // ---- minimal DOM shim -----------------------------------------------------
@@ -36,13 +36,27 @@ class El {
       },
     };
   }
-  set textContent(v) { this._children = []; this._text = String(v); }
+  set textContent(v) { this.innerHTML = ""; this._text = String(v); }
   get textContent() {
     return (this._text || "") + this._children.map((c) => c.textContent).join("");
   }
-  set innerHTML(v) { this._children = []; this._text = ""; }
+  set innerHTML(v) {
+    for (const child of this._children) child.parentNode = null;
+    this._children = []; this._text = "";
+  }
   get innerHTML() { return ""; }
-  appendChild(c) { this._children.push(c); return c; }
+  get children() { return this._children; }
+  appendChild(c) { c.remove(); this._children.push(c); c.parentNode = this; return c; }
+  insertBefore(c, before) {
+    c.remove();
+    this._children.splice(before ? this._children.indexOf(before) : this._children.length, 0, c);
+    c.parentNode = this;
+    return c;
+  }
+  remove() {
+    if (this.parentNode) this.parentNode._children.splice(this.parentNode._children.indexOf(this), 1);
+    this.parentNode = null;
+  }
   addEventListener(type, fn) { (this._listeners[type] ||= []).push(fn); }
   dispatch(type) { for (const fn of this._listeners[type] || []) fn({ target: this }); }
   click() { this.dispatch("click"); }
@@ -100,7 +114,7 @@ test("typing in the SQL box filters rows and updates the count", () => {
   const sql = section.find("sql-filter-input");
   sql.value = "flowlog";          // bare word -> substring fallback (no AlaSQL here)
   sql.dispatch("input");
-  assert.equal(api.getState().ui.tables.errors.sql, "flowlog");
+  assert.equal(api.getState().ui.tables[ctx.tableKey("errors")].sql, "flowlog");
   assert.equal(visibleRowCount(section), 1);
   assert.equal(section.find("row-count").textContent, "(1/3 rows)");
 });
@@ -115,21 +129,15 @@ test("clicking the heading toggles the collapsed class", () => {
   assert.equal(section.classList.contains("collapsed"), false);
 });
 
-test("unchecking a checkbox rewrites the SQL box (round-trips through state)", () => {
-  // Wiring only: the actual row filtering for a generated `backend = '...'`
-  // clause needs AlaSQL (absent here -> substring fallback), so it is exercised
-  // in the browser. Here we prove checkbox -> state.sql -> input -> checkbox.
+test("checkboxes filter rows without rewriting the SQL control", () => {
   const { api, section } = fresh();
-  // cols are backend(2), mode(2), file(3); first checkbox is backend's first value.
-  const box = section.findAll("checkbox-item")[0]._children[0]; // the <input>
-  assert.equal(box.checked, true);
+  const box = section.findAll("checkbox-item")[0]._children[0];
   box.checked = false;
   box.dispatch("change");
-  const sql = api.getState().ui.tables.errors.sql;
-  assert.match(sql, /backend (=|IN)/);
-  assert.equal(section.find("sql-filter-input").value, sql);
-  // a re-render re-derives the checkbox from sql: it stays unchecked.
+  assert.equal(section.find("sql-filter-input").value, "");
+  assert.equal(visibleRowCount(section), 1);
   api.render();
+  assert.equal(section.findAll("checkbox-item")[0]._children[0], box);
   assert.equal(box.checked, false);
 });
 
@@ -139,7 +147,7 @@ test("Clear all filters resets sql + colFilters and shows every row", () => {
   sql.value = "feldera"; sql.dispatch("input");
   assert.equal(visibleRowCount(section), 2);
   root.find("clear-filters-btn").click();
-  assert.equal(api.getState().ui.tables.errors.sql, "");
+  assert.equal(api.getState().ui.tables[ctx.tableKey("errors")].sql, "");
   assert.equal(visibleRowCount(section), 3);
   assert.equal(sql.value, "");
 });
@@ -172,18 +180,18 @@ test("highlight selector switches lowest -> highest -> none", () => {
     times: [{ bench: "a", naive: 5, proofs: 2 }, { bench: "b", naive: 1, proofs: 4 }],
   }, "T");
   const section = root.find("table-section");
-  const trs = section.findTag("tbody")._children;
+  const trs = () => section.findTag("tbody")._children;
   const best = (tr) => tr._children.filter((td) => td._classes.has("cell-best")).map((td) => td.textContent);
   const sel = section.find("highlight-control")._children.find((c) => c.tagName === "SELECT");
   // default lowest
-  assert.equal(JSON.stringify(best(trs[0])), JSON.stringify(["2"]));
+  assert.equal(JSON.stringify(best(trs()[0])), JSON.stringify(["2"]));
   // switch to highest
   sel.value = "highest"; sel.dispatch("change");
-  assert.equal(JSON.stringify(best(trs[0])), JSON.stringify(["5"]));
-  assert.equal(JSON.stringify(best(trs[1])), JSON.stringify(["4"]));
+  assert.equal(JSON.stringify(best(trs()[0])), JSON.stringify(["5"]));
+  assert.equal(JSON.stringify(best(trs()[1])), JSON.stringify(["4"]));
   // none -> nothing highlighted
   sel.value = "none"; sel.dispatch("change");
-  assert.equal(best(trs[0]).length, 0);
+  assert.equal(best(trs()[0]).length, 0);
 });
 
 test("computed-table columns come from optionRows, so they survive narrowing", () => {
@@ -225,6 +233,72 @@ test("styled cells render their text + apply inline style, and caption shows", (
   assert.equal(bad.textContent, "slower");
   assert.equal(bad.style.color, "red");
   assert.equal(bad.style.fontWeight, "600");
+});
+
+test("checkbox DOM state distinguishes scalar types independently of SQL", () => {
+  ctx.alasql = createRequire(import.meta.url)("../eval_live/vendor/alasql.min.js");
+  const root = new El("div");
+  const api = ctx.initEvalLive(root, {values: [true, "true", "A", "a", null, ""].map(value => ({value}))});
+  const section = root.find("table-section");
+  const sql = section.find("sql-filter-input");
+  for (const label of ["true", '\"true\"', '\"A\"', "(null / missing)", "(empty string)"]) {
+    const items = section.findAll("checkbox-item");
+    for (const item of items) item._children[0].checked = item.textContent === label;
+    items.find(item => item.textContent === label)._children[0].dispatch("change");
+    api.render();
+    assert.equal(visibleRowCount(section), 1);
+    assert.equal(sql.value, "");
+    const checked = section.findAll("checkbox-item").filter(el => el._children[0].checked);
+    assert.deepEqual(checked.map(el => el.textContent), [label]);
+  }
+  sql.value = "[value] = 'A'";
+  sql.dispatch("input");
+  assert.equal(visibleRowCount(section), 0);
+  root.find("clear-filters-btn").click();
+  assert.equal(visibleRowCount(section), 6);
+});
+
+test("result replacement preserves controls, selections, and column alignment", () => {
+  const rows = [{a: 1, b: 2}, {a: 3, b: 4}];
+  const state = ctx.makeState({}, "Report", "python");
+  state.engine.status = "ready";
+  const view = ctx.buildTableView("Summary", rows, "computed", true, null, {});
+  ctx.setColFilter(state, "Summary", "b", "2", "computed");
+  view.sync(state);
+  const input = view.section.findAll("filter-input")[1];
+  document.activeElement = input;
+  const oldRow = view.section.findTag("tbody")._children[0];
+  view.update([{c: 0, a: 1, b: 2}], rows);
+  view.sync(state);
+  assert.equal(view.section.findAll("filter-input")[2], input);
+  assert.equal(document.activeElement, input);
+  assert.notEqual(view.section.findTag("tbody")._children[0], oldRow);
+  assert.deepEqual(view.section.findTag("thead")._children[0]._children.slice(1).map(n => n.textContent), ["c", "a", "b"]);
+  assert.deepEqual(view.section.findTag("tbody")._children[0]._children.slice(1).map(n => n.textContent), ["0", "1", "2"]);
+  view.update([], []);
+  view.sync(state);
+  assert.equal(view.section.findAll("filter-input")[2], input);
+  assert.equal(visibleRowCount(view.section), 0);
+  document.activeElement = null;
+});
+
+test("raw values wait for computed narrowing and stay hidden on failure", () => {
+  const rows = [{value: 1}, {value: 2}];
+  const state = ctx.makeState({samples: rows}, "Report", "python");
+  const view = ctx.buildTableView("samples", rows, "raw", true, null, {});
+  ctx.setSql(state, "Summary", "value > 0", "computed");
+  view.sync(state);
+  assert.equal(visibleRowCount(view.section), 0);
+  assert.equal(view.section.find("row-count").textContent, "(updating)");
+  state.engine.status = "ready";
+  state.engine.narrowing = {samples: [rows[1]]};
+  view.sync(state);
+  assert.equal(visibleRowCount(view.section), 1);
+  state.engine.status = "error";
+  state.engine.narrowing = null;
+  view.sync(state);
+  assert.equal(visibleRowCount(view.section), 0);
+  assert.equal(view.section.find("row-count").textContent, "(unavailable)");
 });
 
 console.log(`\n${passed} tests passed`);

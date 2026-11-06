@@ -39,35 +39,26 @@ def _rich_style(style):
     return " ".join(parts)
 
 
-def render(tables, data, console=None, names=None):
-    """Render registered ``(name, fn, interactive_filter, caption)`` tables to a rich
-    console. Columns and headers are the row keys, in first-seen order; styled
-    cells are colored via their ``style`` spec. Returns the console used.
+def render(tables, console=None):
+    """Print evaluated table results and return the rich Console used.
 
-    ``names``, if given, is an ordered list of table names to render (others are
-    skipped); unknown names raise ``ValueError``. Tables whose fn returns no rows
-    are skipped.
+    Each result contains ``name``, ``rows``, and optional ``caption``. Row keys
+    provide columns in first-seen order. Empty tables are skipped; styled cells
+    retain their text and formatting. No evaluation callbacks are called here.
     """
     if console is None:
         console = Console()
 
-    if names is not None:
-        by_name = {t[0]: t for t in tables}
-        missing = [n for n in names if n not in by_name]
-        if missing:
-            raise ValueError(f"unknown table(s): {missing}")
-        tables = [by_name[n] for n in names]
-
-    for name, fn, _fs, caption in tables:
-        rows = fn(data)
+    for result in tables:
+        rows = result["rows"]
         if not rows:
             continue
         cols = list(dict.fromkeys(k for r in rows for k in r))
 
         table = Table(
-            title=name,
+            title=result["name"],
             title_style="bold",
-            caption=caption,
+            caption=result.get("caption"),
             caption_style="dim",
             caption_justify="left",
             header_style="bold",

@@ -1,34 +1,30 @@
-/* Part of eval-live -- the state core: ONE state object plus pure derivations,
-   reducers, and SQL-clause helpers. No DOM, no async, no shared mutable globals.
-   Everything here is plain JS that runs in node, so it is unit-tested directly
-   (see test/state.test.mjs).
-
-   The design: there is a single `state` object (built by makeState). The DOM
-   layer (table-view.js) and the Pyodide engine (graph-engine.js) READ derived
-   values from it and never keep their own copy of UI state -- which is why
-   collapse/filter/active-graph survive a re-render. Reducers mutate `state` in
-   place (its identity is stable; the view holds a reference); initEvalLive wraps
-   each reducer in setState() to trigger a render.
-
-   Loaded as a plain <script> (global function declarations, no ES modules):
-   js() concatenates all modules into one inline tag; index.html loads them as
-   separate <script src>. Depends on sql-filter.js (sqlMatchSet, clauseForColumn). */
+/* Viewer state, pure filtering helpers, and synchronous reducers.
+   state.data is fixed for the viewer's lifetime. state.ui holds current controls;
+   the engine copies these controls for each calculation and publishes derived
+   outputs in state.engine. Reducers change the live state and report whether it
+   changed; eval-live.js decides whether to redraw or request a calculation.
+   No DOM or asynchronous work belongs here. Loaded as a plain script after
+   sql-filter.js (sqlMatchSet); tested in test/state.test.mjs. */
 
 // ---- construction ---------------------------------------------------------
 
 function makeTableUi(kind) {
-  // collapsed: minimized to just its heading. sql: the SQL filter box text
-  // (also the single source of truth the checkboxes are derived from).
-  // colFilters: per-column substring inputs, ANDed on top of sql.
+  // SQL, column substrings, and typed checkbox selections are independent
+  // constraints. A row must pass all three. Missing checkbox keys allow all values.
   // highlight: which numeric cell to mark per row -- "lowest" | "highest" | "none".
-  return { kind: kind, collapsed: false, sql: "", colFilters: {}, highlight: "lowest" };
+  return { kind: kind, collapsed: false, sql: "", colFilters: {}, checkedValues: {}, highlight: "lowest" };
 }
 
+/**
+ * Create viewer state for named row tables. Retains data as supplied; callers
+ * must not mutate it. Rejects whole numbers outside the browser's exact range.
+ */
 function makeState(data, projectName, graphScript, evalLivePy) {
+  browserNumbers(data);
   const tables = {};
   for (const name of Object.keys(data)) {
     const rows = data[name];
-    if (Array.isArray(rows) && rows.length > 0) tables[name] = makeTableUi("raw");
+    if (Array.isArray(rows) && rows.length > 0) tables[tableKey(name, "raw")] = makeTableUi("raw");
   }
   return {
     data: data,
@@ -36,7 +32,7 @@ function makeState(data, projectName, graphScript, evalLivePy) {
     graphScript: graphScript || null,
     evalLivePy: evalLivePy || null,
     ui: {
-      tables: tables,        // tableName -> { kind, collapsed, sql, colFilters }
+      tables: tables,        // tableKey(name, kind) -> controls for that table
       activeGraph: null,     // selected graph name (null = first available)
     },
     engine: {
@@ -58,11 +54,28 @@ function makeState(data, projectName, graphScript, evalLivePy) {
   };
 }
 
-// Ensure a ui entry exists for a (possibly computed) table; returns it. Computed
-// tables are not known until Pyodide runs, so their ui is created lazily.
-function ensureTableUi(state, name, kind) {
-  if (!state.ui.tables[name]) state.ui.tables[name] = makeTableUi(kind || "computed");
-  return state.ui.tables[name];
+// Validate nested display values without coercion. Larger integer identifiers
+// must be strings; accepting a rounded number here would corrupt later filtering.
+function browserNumbers(value) {
+  if (typeof value === "bigint" ||
+      (typeof value === "number" && Number.isInteger(value) && !Number.isSafeInteger(value))) {
+    throw new Error("Integer exceeds the browser's exact range; use a string for identifiers");
+  }
+  if (value !== null && typeof value === "object") {
+    for (const item of Object.values(value)) browserNumbers(item);
+  }
+}
+
+// Raw, computed, and diagnostic tables may share a display name.
+function tableKey(name, kind = "raw") {
+  return JSON.stringify([kind, name]);
+}
+
+// Equal display names in different sections have independent controls.
+function ensureTableUi(state, name, kind = "raw") {
+  const key = tableKey(name, kind);
+  if (!state.ui.tables[key]) state.ui.tables[key] = makeTableUi(kind);
+  return state.ui.tables[key];
 }
 
 // ---- pure helpers ---------------------------------------------------------
@@ -94,10 +107,9 @@ function applyCellStyle(td, style) {
   if (style.dim) td.style.opacity = "0.65";
 }
 
-// Indices of rows passing a table's filter ui: per-column substring inputs
-// (ANDed) and then the SQL box. The SQL box is evaluated once over all rows via
-// AlaSQL (sqlMatchSet); plain/invalid text falls back to a substring match
-// across all columns -- identical semantics to the old applyFilters().
+// Indices of rows passing all checkbox, column text, and SQL constraints.
+// The SQL box is evaluated once over all rows via AlaSQL (sqlMatchSet);
+// plain/invalid text falls back to a substring match across all columns.
 function visibleRowIndices(rows, cols, ui) {
   const sqlText = (ui.sql || "").trim();
   const sqlSet = sqlText ? sqlMatchSet(sqlText, rows) : null;
@@ -105,9 +117,10 @@ function visibleRowIndices(rows, cols, ui) {
   const out = [];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i];
-    let show = true;
+    let show = Object.entries(ui.checkedValues || {}).every(([col, values]) =>
+      values.includes(row[col] === undefined ? null : row[col]));
     for (const col of cols) {
-      const q = (ui.colFilters[col] || "").toLowerCase();
+      const q = (Object.hasOwn(ui.colFilters, col) ? ui.colFilters[col] : "").toLowerCase();
       if (!q) continue;
       if (!cellText(row[col]).toLowerCase().includes(q)) { show = false; break; }
     }
@@ -126,24 +139,22 @@ function visibleRows(rows, ui) {
   return visibleRowIndices(rows, columnsOf(rows), ui).map((i) => rows[i]);
 }
 
-// Raw data after applying each raw table's own filter ui. This is the engine
-// input that drives graphs + computed tables. It deliberately IGNORES
-// engine.narrowing (the computed->raw feedback) so there is no recompute cycle:
-// raw filters feed computed tables, computed filters feed raw display, and the
-// two never chase each other.
+// Apply each raw table's own controls, retaining empty tables. Input narrowing
+// is excluded here: these rows determine the computed selections that narrow it.
 function rawFilteredData(state) {
   const out = {};
   for (const name of Object.keys(state.data)) {
     const rows = state.data[name];
-    const ui = state.ui.tables[name];
-    if (!Array.isArray(rows) || !rows.length || !ui || ui.kind !== "raw") continue;
-    out[name] = visibleRows(rows, ui);
+    const ui = state.ui.tables[tableKey(name)];
+    if (!Array.isArray(rows)) continue;
+    out[name] = ui ? visibleRows(rows, ui) : rows;
   }
   return out;
 }
 
-// Raw data after raw and computed-table filters, used by graphs and displayed
-// computed tables. Filter inputs come from computedUnfiltered to avoid cycles.
+// Intersect raw-filtered rows with the interactive filters' allowed rows.
+// An omitted table keeps its rows; an empty allowed list removes all of them.
+// Used for displayed tables and graphs; cannot reintroduce a raw-filtered row.
 function effectiveRawData(state) {
   const fd = rawFilteredData(state);
   const narrowing = state.engine.narrowing;
@@ -170,10 +181,9 @@ function computedFilterInputs(state) {
   const out = [];
   for (const t of state.engine.computedUnfiltered) {
     if (!t.hasInteractiveFilter) continue;
-    const ui = state.ui.tables[t.name];
+    const ui = state.ui.tables[tableKey(t.name, "computed")];
     if (!ui) continue;
-    const active = (ui.sql && ui.sql.trim()) || Object.keys(ui.colFilters).length > 0;
-    if (!active) continue;
+    if (!hasFilters(ui)) continue;
     out.push({ name: t.name, filtered_rows: visibleRows(t.rows, ui) });
   }
   return out;
@@ -182,28 +192,28 @@ function computedFilterInputs(state) {
 // Sorted distinct values of a column, or null if any value is a non-scalar
 // (object/array) -- such columns get no checkbox dropdown. Pure so the dropdown
 // list can be derived (and tested) rather than computed ad hoc in the view.
+// Preserve scalar types; missing cells and null share one option.
 function distinctScalarValues(rows, col) {
   const distinct = new Set();
   for (const r of rows) {
     const v = r[col];
     if (v !== undefined && v !== null && typeof v === "object") return null;
-    distinct.add(v === undefined || v === null ? "" : String(v));
+    distinct.add(v === undefined ? null : v);
   }
-  return [...distinct].sort();
+  return [...distinct].sort((a, b) => String(a).localeCompare(String(b)) || (typeof a).localeCompare(typeof b));
 }
 
-// Stable key for memoizing async engine work (so Pyodide only re-runs when its
-// inputs actually change).
-function stableKey(value) {
-  return JSON.stringify(value);
-}
-
-// Row identity for the computed->raw narrowing: a row is "allowed" if it matches
-// one of the narrowed rows. Defined in ONE place so the identity scheme (today:
-// content via JSON; could become a stable id) can be hardened without touching
-// the call sites in effectiveRawData and the table view.
+// Identify JSON rows by their complete contents, independent of object key order.
+// Both graph inputs and visible raw rows use this equality when narrowing data.
 function rowKey(row) {
-  return JSON.stringify(row);
+  function canonical(value) {
+    if (Array.isArray(value)) return value.map(canonical);
+    if (value !== null && typeof value === "object") {
+      return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonical(value[key])]));
+    }
+    return value;
+  }
+  return JSON.stringify(canonical(row));
 }
 function narrowedKeySet(rows) {
   return new Set(rows.map(rowKey));
@@ -232,89 +242,31 @@ function bestNumericCols(row, cols, mode) {
   return new Set(nums.filter((x) => x.n === best).map((x) => x.col));
 }
 
-// ---- SQL-clause <-> checkbox helpers (pure string ops) --------------------
-// Checkboxes are a VIEW of ui.sql. extractColumnValues reads which values a
-// column is constrained to (for rendering checked state); setColumnClause
-// rewrites ui.sql when a checkbox toggles. State for "which clause did this
-// column generate" is derived from the SQL text itself -- nothing extra stored.
-
-// Recognize `col = 'v'` or `col IN ('a','b',...)`; returns the value list, or
-// null if there is no such clause for `col`.
-function extractColumnValues(text, col) {
-  const c = col.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const inRe = new RegExp(`\\b${c}\\s+IN\\s*\\(([^)]*)\\)`, "i");
-  const eqRe = new RegExp(`\\b${c}\\s*=\\s*'((?:[^']|'')*)'`, "i");
-  let m = inRe.exec(text);
-  if (m) {
-    const vals = [];
-    const re = /'((?:[^']|'')*)'/g;
-    let mm;
-    while ((mm = re.exec(m[1])) !== null) vals.push(mm[1].replace(/''/g, "'"));
-    return vals;
-  }
-  m = eqRe.exec(text);
-  if (m) return [m[1].replace(/''/g, "'")];
-  return null;
-}
-
-// Tidy doubled / dangling AND glue left by removing a clause.
-function tidyAnds(text) {
-  return text
-    .replace(/^\s*AND\s+/i, "")
-    .replace(/\s+AND\s*$/i, "")
-    .replace(/\s+AND(\s+AND)+\s+/gi, " AND ")
-    .replace(/\s+/g, " ")
-    .trim();
-}
-
-// Remove any recognizable `col = ...` / `col IN (...)` clause for `col` from
-// `sql`, healing one adjacent AND so no dangling glue remains.
-function removeColumnClause(sql, col) {
-  const c = col.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const inRe = new RegExp(`(\\s*AND\\s+)?\\b${c}\\s+IN\\s*\\([^)]*\\)(\\s+AND\\s*)?`, "i");
-  const eqRe = new RegExp(`(\\s*AND\\s+)?\\b${c}\\s*=\\s*'(?:[^']|'')*'(\\s+AND\\s*)?`, "i");
-  let text = sql;
-  for (const re of [inRe, eqRe]) {
-    text = text.replace(re, (full, before, after) => (before && after ? " AND " : ""));
-  }
-  return tidyAnds(text);
-}
-
-// Replace the clause for `col` in `sql` with `newClause` ("" removes it),
-// ANDing a non-empty clause onto whatever else the user typed.
-function setColumnClause(sql, col, newClause) {
-  const removed = removeColumnClause(sql, col);
-  if (!newClause) return removed;
-  return removed ? removed + " AND " + newClause : newClause;
-}
-
-// The SQL clause a set of checked values implies for a column, given the full
-// set of distinct values. All checked (or count match) => "" (no constraint).
-function columnClauseFor(col, checkedValues, allValues) {
-  if (checkedValues.length === allValues.length) return "";
-  return clauseForColumn(col, checkedValues); // "" when none checked, from sql-filter.js
+// True when any input constraint is active, including checkbox-only selections.
+function hasFilters(ui) {
+  return !!(ui.sql.trim() || Object.keys(ui.colFilters).length || Object.keys(ui.checkedValues).length);
 }
 
 // ---- reducers (mutate state in place; return true if something changed) ----
 
-function toggleCollapsed(state, name) {
-  const ui = ensureTableUi(state, name);
+function toggleCollapsed(state, name, kind = "raw") {
+  const ui = ensureTableUi(state, name, kind);
   ui.collapsed = !ui.collapsed;
   return true;
 }
 
-function setSql(state, name, sql) {
-  const ui = ensureTableUi(state, name);
+function setSql(state, name, sql, kind = "raw") {
+  const ui = ensureTableUi(state, name, kind);
   if (ui.sql === sql) return false;
   ui.sql = sql;
   return true;
 }
 
-function setColFilter(state, name, col, value) {
-  const ui = ensureTableUi(state, name);
-  const cur = ui.colFilters[col] || "";
+function setColFilter(state, name, col, value, kind = "raw") {
+  const ui = ensureTableUi(state, name, kind);
+  const cur = Object.hasOwn(ui.colFilters, col) ? ui.colFilters[col] : "";
   if (cur === (value || "")) return false;
-  if (value) ui.colFilters[col] = value; else delete ui.colFilters[col];
+  if (value) ui.colFilters = {...ui.colFilters, [col]: value}; else delete ui.colFilters[col];
   return true;
 }
 
@@ -324,13 +276,12 @@ function setActiveGraph(state, name) {
   return true;
 }
 
-// Apply a checkbox toggle for `col`: regenerate the column's clause from the
-// `checked` values (out of `all`) and splice it into the table's SQL box. The
-// checkboxes are a view of ui.sql, so this is just an edit to that string.
-function toggleCheckbox(state, name, col, checked, all) {
-  const ui = ensureTableUi(state, name);
-  const clause = columnClauseFor(col, checked, all);
-  return setSql(state, name, setColumnClause(ui.sql || "", col, clause));
+// All checked or none checked removes the constraint; SQL text is unchanged.
+function toggleCheckbox(state, name, col, checked, all, kind = "raw") {
+  const ui = ensureTableUi(state, name, kind);
+  if (!checked.length || checked.length === all.length) delete ui.checkedValues[col];
+  else ui.checkedValues = {...ui.checkedValues, [col]: [...checked]};
+  return true;
 }
 
 // The graph to show: the chosen one if it still exists, else the first. Pure so
@@ -342,8 +293,8 @@ function resolveActiveGraph(state) {
   return names[0] || null;
 }
 
-function setHighlight(state, name, mode) {
-  const ui = ensureTableUi(state, name);
+function setHighlight(state, name, mode, kind = "raw") {
+  const ui = ensureTableUi(state, name, kind);
   if (ui.highlight === mode) return false;
   ui.highlight = mode;
   return true;
@@ -355,6 +306,7 @@ function clearAllFilters(state) {
     const ui = state.ui.tables[name];
     if (ui.sql) { ui.sql = ""; changed = true; }
     if (Object.keys(ui.colFilters).length) { ui.colFilters = {}; changed = true; }
+    if (Object.keys(ui.checkedValues).length) { ui.checkedValues = {}; changed = true; }
   }
   return changed;
 }
@@ -362,11 +314,11 @@ function clearAllFilters(state) {
 // Export for node tests only; harmless in the browser (no module global there).
 if (typeof module !== "undefined" && module.exports) {
   module.exports = {
-    makeState, makeTableUi, ensureTableUi, cellText, columnsOf,
+    makeState, makeTableUi, tableKey, ensureTableUi, cellText, columnsOf,
     visibleRowIndices, visibleRows, rawFilteredData, effectiveRawData,
-    computedFilterInputs, distinctScalarValues, stableKey, rowKey, narrowedKeySet,
+    computedFilterInputs, distinctScalarValues, rowKey, narrowedKeySet,
     isNumericValue, bestNumericCols,
-    extractColumnValues, removeColumnClause, setColumnClause, columnClauseFor, tidyAnds,
+    hasFilters,
     toggleCollapsed, setSql, setColFilter, setActiveGraph, toggleCheckbox,
     resolveActiveGraph, setHighlight, clearAllFilters,
   };

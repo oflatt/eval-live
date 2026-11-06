@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 import hashlib
 from pathlib import Path, PurePosixPath
 import subprocess
@@ -94,9 +94,23 @@ class Target:
                 if (directory / ".git").exists():
                     git(self.repository, "worktree", "remove", "--force", str(directory))
 
-    def materialized_input_hashes(self, directory: Path, inputs: Sequence[str | Path]) -> list[dict]:
-        """Hash the files actually executed, detecting callback/build mutations."""
-        return replace(self, repository=directory, working=True).input_hashes(inputs)
+    def inputs_match(self, inputs: Sequence[str | Path], expected: list[dict],
+                     directory: Path | None = None) -> bool:
+        """Check mutable inputs against the plan, and a checkout against its commit.
+
+        Committed directories include tracked files only. Git applies its clean
+        filters when checking checkout contents; generated untracked files do not
+        invalidate them. Absolute inputs and WORKTREE use filesystem hashes.
+        With no checkout, only mutable inputs need checking.
+        """
+        if self.working:
+            return self.input_hashes(inputs) == expected
+        external = [path for path in inputs if Path(path).is_absolute()]
+        if self.input_hashes(external) != [row for row in expected if Path(row["path"]).is_absolute()]:
+            return False
+        relative = [str(path) for path in inputs if not Path(path).is_absolute()]
+        return directory is None or not relative or not git(
+            directory, "diff", "--name-only", self.commit, "--", *relative)
 
 
 def script_revision(script: Path | None) -> dict:

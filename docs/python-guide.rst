@@ -72,8 +72,12 @@ working files; dirty collection requires ``--allow-dirty`` and bypasses reuse.
 Declare helper functions with ``dependencies``, external files/directories
 with ``inputs``, toolchain versions with ``tools``, and execution variables
 with ``environment``. Relative input paths are read at the target commit;
-absolute inputs are hashed from the filesystem. The library cannot infer
-undeclared globals, dependencies, or external services.
+absolute inputs are hashed from the filesystem. For a committed directory,
+only tracked files are inputs: generated files such as ``__pycache__`` do not
+invalidate it. Tracked-file changes found after a build or collector produce
+failure rows. Absolute directories and ``WORKTREE`` use filesystem contents,
+including untracked files. The library cannot infer undeclared globals,
+dependencies, or external services.
 
 An optional ``build(context) -> Path`` receives ``build_config`` and prepares
 ``context.binary``. Builds share work across compatible treatments in an
@@ -304,7 +308,10 @@ reporting errors, or a failing CLI exit status.
 Ctrl+C stops the whole evaluation: active workers and their commands are
 cancelled on POSIX, queued treatments do not start, and figure generation is
 skipped. Temporary worktrees and their Git registrations are removed after
-workers stop. Completed rows remain saved; unfinished treatments keep explicit
+workers stop. Workers that do not stop within a short grace period are killed;
+pressing Ctrl+C again during cleanup does not interrupt that cleanup. Forced
+termination may leave no command logs for that worker. Completed rows remain
+saved; unfinished treatments keep explicit
 interrupted rows and are eligible for collection on the next invocation.
 After an abrupt process crash, the already-saved placeholders still provide
 row coverage. ``--force`` retains earlier attempts as history.
@@ -339,8 +346,9 @@ by every dependent output.
 callbacks run. Identical level/message pairs are deduplicated across outputs.
 The CLI ends with all warnings followed by all errors. Warnings do not fail
 the command; reporting errors give a failing exit status after the remaining
-outputs have rendered. An exception in a figure is also a reporting error and
-does not prevent the other figures from running.
+outputs have been evaluated. An exception in a figure is also a reporting error.
+Files are published only when rendering succeeds. Errors or Ctrl+C remove
+generated outputs and preserve the measurement database for another attempt.
 
 The interactive page shows derived Warnings and Errors tables. Messages update
 with filtered data; they are not appended to the raw tables. ``--render-only``
@@ -353,24 +361,80 @@ Replay
 ``--invocation ID``. It replays saved selections, including empty requirements, without evaluating
 selectors, resolving Git refs, or collecting. The rendering script and its
 dependencies must remain available. Use ``--only`` when replaying an invocation
-that contained only a subset of outputs. ``--data PATH`` shares a cache across
-output directories; use separate directories for subset reports because old
-unrelated generated files remain in place.
+that contained only a subset of outputs. Every selected benchmark must still be
+declared with the saved data version. A version mismatch fails before rendering;
+run without ``--render-only`` to collect the current version.
+
+Only measurement data is cached. Each invocation regenerates figures, tables,
+macros, and HTML, replacing the previous generated report in its output
+directory. Outputs omitted by ``--only`` or callbacks returning ``None`` are
+removed. ``--data PATH`` shares a measurement cache across output directories;
+use separate output directories to keep several reports. Concurrent invocations
+must use separate output directories. The HTML contains every run referenced by
+its selected outputs, including cached attempts and other commits, together
+with their provenance. Unrelated history remains in the JSON database.
 
 ``run_tables(data)``, ``run_graphs(data)``, the terminal renderer, and
 ``render_to_dir(data, path)`` use data supplied by the caller and never
 collect. The directory renderer writes table JSON sidecars; ``reg.run``
 writes all evaluation data to one JSON file.
 
+Avoid misleading results
+------------------------
+
+Declare every input that can change a measurement: CLI parameters, treatment
+fields, helper ``dependencies``, input files, tool versions, and environment
+variables. A Python global or closure value is not automatically part of the
+cache key. Bump the benchmark's ``version`` when an undeclared change affects
+the measurement protocol, units, or table meaning.
+
+Preserving rows does not make every aggregation valid. Count requested,
+successful, timed-out, and failed treatments before computing statistics.
+A mean over successes alone can favor an algorithm that fails on its hardest
+inputs. State the timeout/error policy in captions and report incomplete
+comparisons with ``warn`` or ``error``. Do not turn a missing measurement into
+zero unless zero has that meaning in the experiment.
+
+Join comparison rows by their treatment fields, including sample or phase when
+applicable. Do not pair rows by list position: collection and retry order can
+differ between commits. Check that each side has exactly the expected keys.
+Keep units explicit, and use the intended measurement column: overall attempt
+duration can include build and preparation time.
+
+Rendering and interactive-filter callbacks should be deterministic functions
+of their supplied data. Avoid mutable globals, fresh randomness, and external
+reads. Share statistical calculations between figures, tables, and macros;
+put random seeds in the recorded measurement configuration. Benchmark callbacks
+should also isolate scratch files so one treatment cannot reuse another's output.
+
+Browser numbers must fit JavaScript's exact integer range, from
+``-(2**53 - 1)`` through ``2**53 - 1`` for whole numbers. Report generation and
+computed browser tables reject larger values instead of rounding them. Use
+strings for large identifiers; choose appropriate units or explicit formatting
+for large measurements. The JSON measurement store retains Python integers.
+
 Interactive reports
 -------------------
 
 The HTML uses the same rendering callbacks and saved selections. Rendering
-and filter callbacks must be named top-level functions in one source file,
-or supply ``browser_source=Path(__file__)`` explicitly. Keep execution under
-``if __name__ == '__main__'`` and execution-only imports inside collection
-callbacks or the entry point. Registration is safe during browser imports.
+and filter callbacks must be named top-level functions. They must share one
+source file unless ``browser_source`` supplies the browser module explicitly.
+``reg.run`` checks the selected callbacks before collecting measurements or
+replacing a report, including in render-only mode. This checks export structure;
+Python execution and package availability can still fail during rendering.
+Keep execution under ``if __name__ == '__main__'`` and execution-only imports
+inside collection callbacks or the entry point. Registration is safe during browser imports.
 Treatment selectors can be lambdas or closures: replay does not execute them.
+
+Checkbox filters preserve scalar types: a number and its string spelling are
+separate choices, as are differently capitalized strings. Null and missing cells
+share an option; the empty string is separate. Clearing every checkbox removes
+that column's constraint, as does selecting every option. Checkbox selections,
+column text filters, and the SQL box apply together: a row must pass all of them.
+Editing one leaves the others unchanged; Clear all filters resets them all.
+While a computed filter is being applied, affected raw rows and computed results
+stay hidden until the report is ready; a failed calculation does not display
+stale values. Filter controls remain editable when no rows match.
 
 ``requires`` selects treatments before collection and limits each rendering
 callback to its selected data. Browser filtering does not change these
@@ -403,6 +467,14 @@ preceding interactive filters. Return a new dictionary and preserve other tables
 and metadata with ``{**data, ...}``. Filters chain in registration order. Handle
 empty input tables in graph/table callbacks. Filtering changes the browser view;
 the saved data stays unchanged.
+
+Each filter change recomputes the report. Tables and graphs appear together
+when the calculation for the current filters finishes; results from an older
+filter selection are discarded. Raw tables, computed tables, and diagnostics
+have separate filter controls even when their names match.
+In SQL filters, quote column names that are reserved words or contain spaces,
+for example ``[value] > 10`` or ``[time (ms)] < 1``. Checkbox choices do not
+require SQL syntax.
 
 Open the HTML directly. Raw tables need no Python runtime; computed tables and
 graphs fetch Pyodide and matplotlib from a pinned CDN. The browser never runs
