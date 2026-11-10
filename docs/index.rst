@@ -16,22 +16,5 @@ tables.
    cli
    api
    data-format
-
-Building the documentation
---------------------------
-
-From the repository root:
-
-.. code-block:: bash
-
-   pip install -e '.[docs]'
-   python -m sphinx -W --keep-going -b html docs docs/_build/html
-   python -m sphinx -W -b doctest docs docs/_build/doctest
-
-Open ``docs/_build/html/index.html``. API signatures and reference text come
-from Python docstrings using `Sphinx autodoc
-<https://www.sphinx-doc.org/en/master/usage/extensions/autodoc.html>`_. The
-`Napoleon extension
-<https://www.sphinx-doc.org/en/master/usage/extensions/napoleon.html>`_ reads
-the existing NumPy-style parameter sections. Keep examples executable and
-build with warnings treated as errors when changing the public API.
+   browser
+   development

@@ -89,6 +89,7 @@ def read_parameters(rows: list[dict]) -> dict:
     groups: dict[str, list[dict]] = {}
     if len(rows) == 1 and rows[0].get("kind") == "empty-mapping":
         if (rows[0].get("name") is not None or rows[0].get("value") is not None
+                or type(rows[0].get("item_index")) is not int
                 or rows[0].get("item_index") != -1 or rows[0].get("value_type") != "null"):
             raise ValueError("invalid empty mapping")
         return {}

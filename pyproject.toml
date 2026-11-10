@@ -17,6 +17,7 @@ dependencies = ["rich>=13.7"]
 # `pip install -e .[render]` to use the local renderer.
 render = ["matplotlib>=3.5"]
 docs = ["sphinx>=7,<10"]
+test = ["hypothesis>=6.100,<7"]
 
 [tool.setuptools.packages.find]
 include = ["eval_live*"]

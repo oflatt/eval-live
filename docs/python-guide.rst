@@ -447,6 +447,8 @@ code before generating final outputs. Uncommitted changes in its checkout
 produce a warning because the revision alone cannot reproduce them. Preserve
 the code and rendering dependencies as well as the data.
 
+.. _avoid-misleading-results:
+
 Avoid misleading results
 ------------------------
 
